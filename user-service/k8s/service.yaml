@@ -1,0 +1,20 @@
+# ClusterIP = reachable only inside the cluster (not exposed publicly).
+# Other pods call it as http://user-service:8081 (same namespace) or
+# http://user-service.shopsphere.svc.cluster.local:8081 (fully qualified).
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: shopsphere
+  labels:
+    app: user-service
+    app.kubernetes.io/part-of: shopsphere
+spec:
+  type: ClusterIP
+  selector:
+    app: user-service
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP
