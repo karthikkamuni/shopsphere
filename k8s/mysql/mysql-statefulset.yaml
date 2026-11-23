@@ -1,0 +1,103 @@
+# Single-node MySQL for the practice environment.
+#
+# Persistence: the volumeClaimTemplate asks the "shopsphere-gp3" StorageClass for
+# a 5 GiB EBS volume. The data survives pod restarts and re-deployments. It is
+# deleted only if you delete the PVC (or the cluster) - see README "Cleanup".
+#
+# Credentials come from the Secret "mysql-credentials", which you create with
+# kubectl (README "Kubernetes deployment"). No password is stored in Git.
+#
+# NOT production-grade: one replica, no backups. For real systems use Amazon RDS.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: shopsphere
+  labels:
+    app: mysql
+    app.kubernetes.io/part-of: shopsphere
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+        app.kubernetes.io/part-of: shopsphere
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          ports:
+            - name: mysql
+              containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: MYSQL_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # TCP ping only succeeds once the real server (not the temporary
+          # initialisation server) is listening.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot --silent
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot --silent
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            # subPath avoids the "lost+found" directory that a freshly formatted
+            # EBS volume contains, which would otherwise make MySQL refuse to initialise.
+            - name: data
+              mountPath: /var/lib/mysql
+              subPath: mysql
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: init
+          configMap:
+            name: mysql-init
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: shopsphere-gp3
+        resources:
+          requests:
+            storage: 5Gi

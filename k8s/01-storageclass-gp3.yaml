@@ -1,0 +1,20 @@
+# StorageClass for MySQL's persistent volume (Amazon EBS gp3).
+#
+# It uses the EBS CSI driver (provisioner ebs.csi.aws.com), which must be
+# installed as an EKS add-on - see README "EKS cluster setup". On current EKS
+# versions the old in-tree "gp2" class no longer provisions volumes by itself.
+#
+# WaitForFirstConsumer delays creating the volume until the MySQL pod is
+# scheduled, so the EBS volume is created in the same Availability Zone as the
+# node (an EBS volume can only attach to nodes in its own AZ).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: shopsphere-gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true

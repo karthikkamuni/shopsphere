@@ -1,0 +1,7 @@
+# Every ShopSphere object lives in this namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shopsphere
+  labels:
+    app.kubernetes.io/part-of: shopsphere
