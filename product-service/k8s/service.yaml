@@ -1,0 +1,20 @@
+# ClusterIP = reachable only inside the cluster (not exposed publicly).
+# Other pods call it as http://product-service:8082 (same namespace) or
+# http://product-service.shopsphere.svc.cluster.local:8082 (fully qualified).
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-service
+  namespace: shopsphere
+  labels:
+    app: product-service
+    app.kubernetes.io/part-of: shopsphere
+spec:
+  type: ClusterIP
+  selector:
+    app: product-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: http
+      protocol: TCP

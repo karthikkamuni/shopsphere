@@ -1,0 +1,105 @@
+# product-service Deployment.
+#
+# The image field holds the placeholder __IMAGE_URI__. The Jenkins pipeline
+# replaces it with the real ECR image (<registry>/shopsphere-product-service:<sha>-b<build>)
+# before running "kubectl apply". To deploy by hand, render it the same way:
+#   sed "s|__IMAGE_URI__|<your-image-uri>|g" k8s/deployment.yaml | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  namespace: shopsphere
+  labels:
+    app: product-service
+    app.kubernetes.io/part-of: shopsphere
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: product-service
+  template:
+    metadata:
+      labels:
+        app: product-service
+        app.kubernetes.io/part-of: shopsphere
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Image pull configuration: no imagePullSecrets are needed when the EKS
+      # worker nodes' IAM role has ECR read access (eksctl/managed node groups
+      # attach it by default) and the ECR repository is in the same AWS account.
+      containers:
+        - name: product-service
+          image: __IMAGE_URI__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+              protocol: TCP
+          env:
+            - name: SERVER_PORT
+              value: "8082"
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:mysql://mysql:3306/productdb?useSSL=false&allowPublicKeyRetrieval=true"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: MYSQL_USER
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: MYSQL_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          # Gives the JVM time to start before liveness/readiness begin.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # Tomcat/JVM need a writable temp dir because the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
