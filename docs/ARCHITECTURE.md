@@ -32,7 +32,7 @@
 
 | Component | Kind | Port | Database | Calls |
 |-----------|------|------|----------|-------|
-| frontend | Deployment + **LoadBalancer** Service (80 → 8080) | 80 / 8080 | – | `user-service:8081`, `product-service:8082`, `order-service:8083` (through nginx) |
+| frontend | Deployment + **LoadBalancer** Service (80 → 8080) | 80 / 8080 | – | auth/users to user-service; products to product-service; cart/orders/admin to order-service |
 | user-service | Deployment + ClusterIP Service | 8081 | `userdb` | – |
 | product-service | Deployment + ClusterIP Service | 8082 | `productdb` | – |
 | order-service | Deployment + ClusterIP Service | 8083 | `orderdb` | `http://user-service:8081`, `http://product-service:8082` |
@@ -54,7 +54,8 @@ Java services is reachable from the internet. You reach them with `kubectl port-
 another pod. The **frontend** is the single public entry point: its Service is `type: LoadBalancer`
 (AWS creates a load balancer and gives it a DNS name). The browser never talks to a backend
 directly; it calls relative URLs such as `/api/users`, and the nginx inside the frontend pod forwards
-only `/api/users`, `/api/products` and `/api/orders` to the matching Service. Actuator endpoints are
+`/api/auth` and `/api/users` to user-service, `/api/products` to product-service, and `/api/cart`,
+`/api/orders` and `/api/admin` to order-service. Actuator endpoints are
 not forwarded, so they stay private. A production system would put an ALB Ingress, TLS and
 authentication in front instead; that is deliberately out of scope here.
 
@@ -62,6 +63,20 @@ authentication in front instead; that is deliberately out of scope here.
 address), no CORS configuration is needed in the Java services, and no backend address is baked into
 the JavaScript bundle. The same built image therefore works in every environment. In local
 development the Vite dev server plays the role of nginx (see `vite.config.js`).
+
+**Authentication and internal trust.** Browser sign-in and registration are handled by user-service.
+All three APIs validate HS256 JWTs with the same `JWT_SECRET`; protected services use the `role` claim
+for ADMIN/USER permissions and user-service rechecks current account status. Frontend route guards are
+only navigation aids. Backend-to-backend calls use the separate `SERVICE_API_KEY` in
+`X-Service-Token`; it is never sent to the browser. The user-service internal customer-details response
+contains only the fields order administration needs and is available only with that service key.
+
+**Checkout consistency.** order-service reserves product stock with an idempotency key, persists local
+order snapshots, then commits the reservations. It releases stock when persistence fails or an eligible
+order is cancelled. A recovery worker retries settlement for persisted orders, while product-service
+expires abandoned reservations after a documented lease. These are compensating actions across separate
+databases, not a distributed ACID transaction. No card payment gateway or shipping-address API is part
+of this demo checkout.
 
 ## 2. CI/CD architecture
 
@@ -122,7 +137,9 @@ development the Vite dev server plays the role of nginx (see `vite.config.js`).
 | Multibranch Script Path | `user-service/Jenkinsfile` | `product-service/Jenkinsfile` | `order-service/Jenkinsfile` | `frontend/Jenkinsfile` |
 
 The Service names `user-service`, `product-service` and `order-service` are also hard-wired into the
-frontend's `nginx.conf` (nginx proxies to `http://user-service:8081` and so on).
+frontend's `nginx.conf`. It routes `/api/auth` and `/api/users` to user-service, `/api/products` to
+product-service, and `/api/cart`, `/api/orders`, and `/api/admin` to order-service. Actuator and internal
+service paths are not exposed through nginx.
 
 `scripts/check_consistency.py` verifies this table automatically against the Git branches.
 
@@ -130,10 +147,7 @@ frontend's `nginx.conf` (nginx proxies to `http://user-service:8081` and so on).
 
 * One MySQL pod on one EBS volume (no replication or backups). Production would use Amazon RDS.
 * `spring.jpa.hibernate.ddl-auto=update` creates tables automatically. Production uses Flyway or Liquibase.
-* **The UI has no login and its load balancer is open to the internet** (plain HTTP, no TLS). Anyone with
-  the address can create users, products and orders. Use it for practice, restrict it with
-  `loadBalancerSourceRanges` in `frontend/k8s/service.yaml` or use `kubectl port-forward`, and delete it
-  when done. No Ingress, TLS, autoscaling, service mesh, Helm, Terraform or GitOps – by design.
+* **The UI has USER and ADMIN sign-in.** Backend services enforce JWT role and account status; browser route guards are not a security boundary. The frontend LoadBalancer is still plain HTTP in this practice setup, so restrict it to trusted source ranges or use port forwarding. Production requires HTTPS and a managed ingress/load balancer.
 * nginx resolves the backend Service names **once, at start-up**. If a Service does not exist yet, the
   frontend pod crash-loops with `host not found in upstream`, so deploy the frontend **last**, and
   restart it (`kubectl rollout restart deployment/frontend`) if you ever delete and recreate a backend Service.

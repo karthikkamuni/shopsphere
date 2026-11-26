@@ -1,24 +1,117 @@
-# MySQL for running the three services on your own machine.
-#
-#   export MYSQL_ROOT_PASSWORD='choose-a-root-password'
-#   export MYSQL_PASSWORD='choose-an-app-password'
-#   docker compose -f local/docker-compose.yml up -d
-#
-# The variables are required: compose refuses to start if they are not set, so
-# no password is ever stored in this file.
+# Full local ShopSphere runtime. Build/tag the four branch images first (README section 6).
+# Secrets are supplied by the caller's environment; none are stored in this file.
 services:
   mysql:
     image: mysql:8.4
-    container_name: shopsphere-mysql
+    restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD before starting}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD}
       MYSQL_USER: shopsphere
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD before starting}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
     ports:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  user-service:
+    image: shopsphere-user-service:${SHOPSPHERE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8081"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/userdb?useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: shopsphere
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Set a shared JWT_SECRET of at least 32 bytes}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?Set a shared SERVICE_API_KEY of at least 32 bytes}
+      SHOPSPHERE_ADMIN_NAME: ${SHOPSPHERE_ADMIN_NAME:?Set initial admin name}
+      SHOPSPHERE_ADMIN_EMAIL: ${SHOPSPHERE_ADMIN_EMAIL:?Set initial admin email}
+      SHOPSPHERE_ADMIN_PASSWORD: ${SHOPSPHERE_ADMIN_PASSWORD:?Set initial admin password}
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/actuator/health/readiness"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 45s
+
+  product-service:
+    image: shopsphere-product-service:${SHOPSPHERE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8082"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/productdb?useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: shopsphere
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Set a shared JWT_SECRET of at least 32 bytes}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?Set a shared SERVICE_API_KEY of at least 32 bytes}
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/actuator/health/readiness"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 45s
+
+  order-service:
+    image: shopsphere-order-service:${SHOPSPHERE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8083"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/orderdb?useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: shopsphere
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Set a shared JWT_SECRET of at least 32 bytes}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?Set a shared SERVICE_API_KEY of at least 32 bytes}
+      SERVICES_USER_URL: http://user-service:8081
+      SERVICES_PRODUCT_URL: http://product-service:8082
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8083/actuator/health/readiness"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 45s
+
+  frontend:
+    image: shopsphere-frontend:${SHOPSPHERE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    depends_on:
+      user-service:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 volumes:
   mysql-data:

@@ -40,10 +40,10 @@ Also read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (naming table, design n
 
 | Service | Purpose | Port | Database | API |
 |---------|---------|------|----------|-----|
-| **user-service** | Customer accounts | 8081 | `userdb` | `POST/GET /api/users`, `GET /api/users/{id}` |
-| **product-service** | Product catalogue | 8082 | `productdb` | `POST/GET /api/products`, `GET /api/products/{id}` |
-| **order-service** | Places orders; calls the other two services to validate the user and read the price | 8083 | `orderdb` | `POST/GET /api/orders`, `GET /api/orders/{id}` |
-| **frontend** | Web UI with one column per service; the only public entry point | 8080 in the container, 80 on the Service | – | serves the site and forwards `/api/users`, `/api/products`, `/api/orders` to the three services |
+| **user-service** | Registration, JWT authentication, roles, account and profile management | 8081 | `userdb` | `/api/auth/*`, `/api/users/*`, trusted `/internal/users/*` |
+| **product-service** | Public catalogue, ADMIN management, inventory reservations | 8082 | `productdb` | `/api/products/*`, trusted `/internal/products/*` |
+| **order-service** | Persistent carts, checkout saga, order history and administration | 8083 | `orderdb` | `/api/cart/*`, `/api/orders/*`, `/api/admin/*` |
+| **frontend** | Customer storefront and admin dashboard; the only public entry point | 8080 in the container, 80 on the Service | – | nginx routes auth/users, products, cart, orders and admin APIs to their owning services |
 
 Every Spring Boot service also exposes `GET /actuator/health` (plus `/actuator/health/liveness` and
 `/actuator/health/readiness`, used by Kubernetes probes).
@@ -69,7 +69,8 @@ Runtime (inside EKS, namespace `shopsphere`). **Only the frontend is public.**
 ```
  Internet ─► AWS load balancer ─► Service frontend :80 ─► nginx pods (2)
                                                                │  serves the React site and forwards
-                                                               │  /api/users  /api/products  /api/orders
+                                                               │  /api/auth, /api/users, /api/products,
+                                                               │  /api/cart, /api/orders, /api/admin
  ┌─────────────────────────── namespace: shopsphere ───────────┼───────────────────────┐
  │        ┌─────────────────────────────────┬──────────────────┘                       │
  │        ▼                                 ▼                       ▼                    │
@@ -105,11 +106,10 @@ the name `user-service` into that Service's internal IP, so `order-service` simp
 `http://user-service:8081`. The address is not written in Java code: it comes from the environment
 variable `SERVICES_USER_URL` (and `SERVICES_PRODUCT_URL`). Locally those default to `localhost`.
 The three backend Services are `ClusterIP`, so they have no public address. The one public entry point
-is the **frontend**: its Service is a `LoadBalancer`, and its nginx container forwards only `/api/users`,
-`/api/products` and `/api/orders` to the backends (the `/actuator` endpoints are not forwarded). The browser
-calls relative URLs such as `/api/users`, so no CORS configuration is needed. A larger real system would use an
-ALB Ingress or API gateway with HTTPS and a login – left out on purpose. This project has no login, so
-restrict the load balancer to your own IP address ([section 12.5](#125-open-the-web-ui)).
+is the **frontend**: its Service is a `LoadBalancer`, and nginx routes `/api/auth` and `/api/users` to
+user-service, `/api/products` to product-service, and `/api/cart`, `/api/orders`, and `/api/admin` to
+order-service. Actuator endpoints remain private. The browser calls relative URLs, so no CORS configuration is needed. A larger real system would use an
+The app has authenticated USER and ADMIN workflows; frontend guards only improve navigation. For public deployments, add HTTPS and restrict access to trusted addresses.
 
 ---
 
@@ -264,89 +264,42 @@ Service branches: see [section 4](#4-git-branch-strategy).
 
 ## 6. Local application execution
 
-Prerequisites: JDK 21, Maven 3.9+, Docker (for MySQL), git.
+Prerequisites: Git, Docker Engine with Compose, Java 21 and Maven 3.9+ (for building the backend images), Node 22.12+ (for building the frontend image).
 
-**1. Start MySQL** (from the `main` branch):
-
-```bash
-export MYSQL_ROOT_PASSWORD='choose-a-root-password'
-export MYSQL_PASSWORD='choose-an-app-password'
-docker compose -f local/docker-compose.yml up -d
-docker compose -f local/docker-compose.yml logs -f mysql      # wait for "ready for connections", Ctrl+C
-```
-
-The compose file refuses to start when those variables are missing, so no password is stored in Git.
-It creates three databases and a user `shopsphere` with access to them.
-
-**2. Get all three services side by side** (they are on different branches):
+The four applications live on separate branches. Create local worktrees and build the images from each branch's service directory:
 
 ```bash
-git worktree add ../shopsphere-user    user-service
+git worktree add ../shopsphere-user user-service
 git worktree add ../shopsphere-product product-service
-git worktree add ../shopsphere-order   order-service
-```
-
-**3. Run each service in its own terminal.** The password is passed by environment variable
-(Spring maps `SPRING_DATASOURCE_PASSWORD` to `spring.datasource.password`):
-
-```bash
-export SPRING_DATASOURCE_USERNAME=shopsphere
-export SPRING_DATASOURCE_PASSWORD="$MYSQL_PASSWORD"          # same value you gave compose
-
-cd ../shopsphere-user/user-service       && mvn spring-boot:run     # :8081
-cd ../shopsphere-product/product-service && mvn spring-boot:run     # :8082
-cd ../shopsphere-order/order-service     && mvn spring-boot:run     # :8083
-```
-
-**4. Try it:**
-
-```bash
-curl -s localhost:8081/actuator/health
-curl -s -X POST localhost:8081/api/users    -H 'Content-Type: application/json' \
-     -d '{"name":"Asha Rao","email":"asha.rao@example.com"}'
-curl -s -X POST localhost:8082/api/products -H 'Content-Type: application/json' \
-     -d '{"name":"Mechanical Keyboard","description":"Tenkeyless","price":49.99}'
-curl -s -X POST localhost:8083/api/orders   -H 'Content-Type: application/json' \
-     -d '{"userId":1,"productId":1,"quantity":2}'          # total = 99.98
-curl -s localhost:8083/api/orders
-```
-
-**Unit tests** need no MySQL (they use in-memory H2 and mock the service-to-service calls):
-
-```bash
-cd user-service && mvn test
-```
-
-**The web UI** (branch `frontend`; needs Node 22.12 or newer):
-
-```bash
+git worktree add ../shopsphere-order order-service
 git worktree add ../shopsphere-frontend frontend
-cd ../shopsphere-frontend/frontend
-npm ci            # installs exactly the versions in package-lock.json
-npm test          # 7 tests, no backend needed
-npm run dev       # http://localhost:5173
+
+docker build -t shopsphere-user-service:local ../shopsphere-user/user-service
+docker build -t shopsphere-product-service:local ../shopsphere-product/product-service
+docker build -t shopsphere-order-service:local ../shopsphere-order/order-service
+(cd ../shopsphere-frontend/frontend && npm ci && npm run build)
+docker build -t shopsphere-frontend:local ../shopsphere-frontend/frontend
 ```
 
-With the three services running, open <http://localhost:5173>. The dev server forwards `/api/users` to
-`localhost:8081`, `/api/products` to `localhost:8082` and `/api/orders` to `localhost:8083` (see
-`vite.config.js`), the same job nginx does in Kubernetes. If a service is not running, its column shows
-"unreachable" with a *Try again* button.
+Set local-only credentials in the current shell. Generate different random values for the JWT signing secret and service-to-service key; never put real values in Git or image build arguments:
 
-**Running the services from Spring Tool Suite (STS):**
+```bash
+export MYSQL_ROOT_PASSWORD='local-only-root-password'
+export MYSQL_PASSWORD='local-only-app-password'
+export JWT_SECRET="$(openssl rand -hex 32)"
+export SERVICE_API_KEY="$(openssl rand -hex 32)"
+export SHOPSPHERE_ADMIN_NAME='ShopSphere Administrator'
+export SHOPSPHERE_ADMIN_EMAIL='admin@example.test'
+export SHOPSPHERE_ADMIN_PASSWORD='use-a-local-password-of-at-least-10-characters'
 
-1. Window → Preferences → Java → Installed JREs: add your JDK 21 and tick it.
-2. File → Import → Maven → Existing Maven Projects: pick each worktree folder
-   (`shopsphere-user/user-service`, `shopsphere-product/product-service`, `shopsphere-order/order-service`).
-   If a project shows red errors afterwards: right-click → Maven → Update Project.
-3. Right-click a project → Run As → JUnit Test (no MySQL needed).
-4. Right-click a project → Run As → Run Configurations → Spring Boot App → *Environment* tab: add
-   `SPRING_DATASOURCE_USERNAME` = `shopsphere` and `SPRING_DATASOURCE_PASSWORD` = your app password. Then run.
-   The ports (8081, 8082, 8083) differ, so all three run together.
+docker compose -f local/docker-compose.yml up -d
+```
 
-Stop MySQL and delete its data: `docker compose -f local/docker-compose.yml down -v`.
+Compose waits for MySQL and backend readiness, then starts the frontend on <http://localhost:8080>. The initial ADMIN is created only if its configured email is absent; product-service seeds its catalog once. MySQL data persists in the `mysql-data` volume across container restarts. `docker compose -f local/docker-compose.yml down` keeps that data; adding `-v` deletes it.
 
----
+The checkout contract currently records the authenticated account, cart, immutable product/price snapshots and order status. There is no shipping-address or payment-provider contract, so this app does not collect addresses or simulate a real charge. Payment integration should be added only with an approved provider and an order/payment contract.
 
+To run the Vite development server instead of the frontend container, start the three backends with the same shared `JWT_SECRET` and `SERVICE_API_KEY`, then run `npm ci && npm run dev` from `../shopsphere-frontend/frontend`. Vite proxies the documented API prefixes to ports 8081–8083.
 ## 7. Docker build instructions
 
 Workflow (the same one Jenkins automates):
@@ -416,7 +369,7 @@ docker run --rm -p 8080:8080 \
 | Line | Reason |
 |------|--------|
 | `FROM nginxinc/nginx-unprivileged:stable-alpine` | Official nginx variant that runs as a non-root user (UID 101), keeps its pid and temp files in `/tmp` and listens on 8080. Its default entrypoint starts nginx, so no `CMD` is needed |
-| `COPY nginx.conf /etc/nginx/conf.d/default.conf` | Serves the site and proxies `/api/users`, `/api/products`, `/api/orders` to the three services |
+| `COPY nginx.conf /etc/nginx/conf.d/default.conf` | Serves the site and proxies authentication/users, products, cart/orders and admin APIs to their owning services |
 | `COPY dist/ /usr/share/nginx/html/` | The built site |
 | `USER 101`, `EXPOSE 8080` | Non-root; the Kubernetes Service maps port 80 to 8080 |
 | `HEALTHCHECK … /healthz` | nginx answers `/healthz` itself, so the check does not depend on the backends |
@@ -778,38 +731,35 @@ ConfigMap, map the IAM user with `eksctl create iamidentitymapping` instead.
 
 ## 12. Kubernetes deployment
 
-### 12.1 Order matters
-
-The **namespace, storage class, Secret and MySQL** must exist **before** the first pipeline run. The
-pipelines create only their own Deployment and Service.
+### 12.1 Deploy the namespace, storage, secrets and database
 
 ```bash
-aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
-
-# 1. Namespace and storage class (checkout the main branch)
 kubectl apply -f k8s/00-namespace.yaml
 kubectl apply -f k8s/01-storageclass-gp3.yaml
-
-# 2. Database credentials – created with kubectl so they never enter Git
-read -r -s -p "MySQL root password: " MYSQL_ROOT_PASSWORD; echo
-read -r -s -p "MySQL app password:  " MYSQL_APP_PASSWORD;  echo
-kubectl -n shopsphere create secret generic mysql-credentials \
-  --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
-  --from-literal=MYSQL_USER=shopsphere \
-  --from-literal=MYSQL_PASSWORD="$MYSQL_APP_PASSWORD"
-
-# 3. MySQL
-kubectl apply -f k8s/mysql/
-kubectl -n shopsphere rollout status statefulset/mysql --timeout=300s
-kubectl -n shopsphere get pvc                      # data-mysql-0 must be Bound
-kubectl -n shopsphere exec mysql-0 -- sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES"'
-#   → userdb, productdb and orderdb are listed
-
-# 4. Deploy the apps: run the Jenkins jobs (section 9) for user-service, product-service and order-service
-#    FIRST, wait until their pods are Ready, and run the frontend job LAST (nginx needs the three Service
-#    names to exist when it starts).
 ```
 
+Create credentials interactively in your deployment environment. The script creates/updates exactly two Secrets: `mysql-credentials` for database credentials and `shopsphere-app-secrets` for the shared JWT key, internal service key and initial administrator settings. It writes no secret manifest to disk or Git:
+
+```bash
+export MYSQL_ROOT_PASSWORD="$(openssl rand -hex 24)"
+export MYSQL_PASSWORD="$(openssl rand -hex 24)"
+export JWT_SECRET="$(openssl rand -hex 32)"
+export SERVICE_API_KEY="$(openssl rand -hex 32)"
+read -r -p "Initial admin name: " SHOPSPHERE_ADMIN_NAME
+read -r -p "Initial admin email: " SHOPSPHERE_ADMIN_EMAIL
+read -r -s -p "Initial admin password (10+ chars): " SHOPSPHERE_ADMIN_PASSWORD; echo
+bash scripts/create-k8s-secrets.sh
+```
+
+Apply MySQL and wait for its persistent volume and readiness:
+
+```bash
+kubectl apply -f k8s/mysql/
+kubectl -n shopsphere rollout status statefulset/mysql --timeout=300s
+kubectl -n shopsphere get pvc
+```
+
+Deploy the three backend branches and wait for each to become Ready. Deploy `frontend` last because nginx resolves backend Service DNS names at startup. The deployments read `JWT_SECRET` and `SERVICE_API_KEY` from `shopsphere-app-secrets`; user-service additionally reads the three `SHOPSPHERE_ADMIN_*` keys. All app deployments read DB credentials from `mysql-credentials`.
 ### 12.2 Database configuration and persistence – explained
 
 * **One MySQL server, three databases** (`userdb`, `productdb`, `orderdb`): each service owns its data
@@ -855,45 +805,33 @@ sed "s|__IMAGE_URI__|${REGISTRY}/shopsphere-user-service:manual-1|g" k8s/deploym
 kubectl apply -f k8s/service.yaml
 ```
 
-### 12.4 Verify and test
+### 12.4 Verify the deployment and customer flow
 
 ```bash
 kubectl -n shopsphere get deploy,pods,svc -o wide
 kubectl -n shopsphere rollout status deployment/user-service
-
-# Call a service through a temporary tunnel (nothing is public)
-kubectl -n shopsphere port-forward svc/user-service    8081:8081 &
-kubectl -n shopsphere port-forward svc/product-service 8082:8082 &
-kubectl -n shopsphere port-forward svc/order-service   8083:8083 &
-
-curl -s -X POST localhost:8081/api/users    -H 'Content-Type: application/json' -d '{"name":"Asha Rao","email":"asha.rao@example.com"}'
-curl -s -X POST localhost:8082/api/products -H 'Content-Type: application/json' -d '{"name":"Keyboard","price":49.99}'
-curl -s -X POST localhost:8083/api/orders   -H 'Content-Type: application/json' -d '{"userId":1,"productId":1,"quantity":2}'
-# This last call proves in-cluster communication: order-service reached the other two via DNS names.
-kill %1 %2 %3
-
-# Prove the DNS name works from inside the cluster
-kubectl -n shopsphere run dns-test --rm -it --restart=Never --image=curlimages/curl -- \
-    curl -s http://user-service:8081/actuator/health
+kubectl -n shopsphere rollout status deployment/product-service
+kubectl -n shopsphere rollout status deployment/order-service
+kubectl -n shopsphere rollout status deployment/frontend
 ```
+
+Open the frontend LoadBalancer address and verify registration, login, catalogue browsing, cart, checkout, confirmation and order history. Sign in with the ADMIN account provisioned by `SHOPSPHERE_ADMIN_*` and verify the dashboard and management pages. These checks exercise the services through the browser proxy and shared cluster secrets. Do not call `/internal/*` APIs from a browser; they require the private service key.
 
 ### 12.5 Open the web UI
 
-The frontend job prints the address in its last stage. You can also read it at any time:
+The frontend Jenkins job prints the LoadBalancer address. Read it with:
 
 ```bash
 kubectl -n shopsphere get service frontend
-# EXTERNAL-IP shows <pending> for a few minutes, then an address ending in .elb.amazonaws.com
 ```
 
-Open `http://<that address>`. Add a user and a product, then place an order. Each column shows whether its
-service is reachable.
+Open the assigned address and sign in with a registered account or the configured initial ADMIN. Backend authorization remains enforced even if a user navigates directly to an admin URL. For safer temporary access, use port forwarding instead:
 
-* **No public address wanted?** Skip the load balancer: `kubectl -n shopsphere port-forward svc/frontend 8080:80`, then open <http://localhost:8080>.
-* **There is no login.** While the load balancer exists, anyone who knows the address can add data. Limit it to your
-  own IP address by uncommenting `loadBalancerSourceRanges` in `frontend/k8s/service.yaml` (commit it to the
-  `frontend` branch), or delete the Service when you stop practising.
-* The address is plain `http`. HTTPS needs a certificate and an Ingress or NLB listener, which is out of scope here.
+```bash
+kubectl -n shopsphere port-forward svc/frontend 8080:80
+```
+
+The frontend Service uses plain HTTP in this practice setup. Restrict `loadBalancerSourceRanges` in `frontend/k8s/service.yaml` or use port forwarding. Production requires TLS and a managed ingress/load balancer configuration.
 
 ### 12.6 Rollouts and rollback
 
