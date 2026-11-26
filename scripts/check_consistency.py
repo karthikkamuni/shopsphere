@@ -50,8 +50,12 @@ FRONTEND_STAGES = [
     "Deploy to EKS",
     "Verify deployment",
 ]
-# URL prefix each backend answers under (the frontend's nginx forwards these)
-API_PATH = {"user-service": "users", "product-service": "products", "order-service": "orders"}
+# URL prefixes owned by each backend and forwarded by frontend nginx.
+API_PATHS = {
+    "user-service": ["auth", "users"],
+    "product-service": ["products"],
+    "order-service": ["cart", "orders", "admin"],
+}
 
 results = []
 
@@ -61,7 +65,8 @@ def check(name, ok, detail=""):
 
 
 def git(*args):
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace").stdout
 
 
 def show(branch, path):
@@ -157,6 +162,15 @@ def check_service(svc, cfg):
     check(f"[{svc}] container is non-root / no privilege escalation",
           spec["template"]["spec"]["securityContext"]["runAsNonRoot"] is True
           and c["securityContext"]["allowPrivilegeEscalation"] is False)
+    for key in ["JWT_SECRET", "SERVICE_API_KEY"]:
+        ref = envs.get(key, {}).get("valueFrom", {}).get("secretKeyRef", {})
+        check(f"[{svc}] {key} comes from shopsphere-app-secrets/{key}",
+              ref.get("name") == "shopsphere-app-secrets" and ref.get("key") == key)
+    if svc == "user-service":
+        for key in ["SHOPSPHERE_ADMIN_NAME", "SHOPSPHERE_ADMIN_EMAIL", "SHOPSPHERE_ADMIN_PASSWORD"]:
+            ref = envs.get(key, {}).get("valueFrom", {}).get("secretKeyRef", {})
+            check(f"[user-service] {key} comes from shopsphere-app-secrets/{key}",
+                  ref.get("name") == "shopsphere-app-secrets" and ref.get("key") == key)
 
     # --- Service -------------------------------------------------------------
     svc_y = yaml.safe_load(show(svc, f"{svc}/k8s/service.yaml"))
@@ -227,8 +241,9 @@ def check_frontend():
     conf = show(name, "frontend/nginx.conf")
     check(f"{tag} nginx listens on 8080", re.search(r"^\s*listen 8080;", conf, re.M) is not None)
     for svc, cfg in SERVICES.items():
-        check(f"{tag} nginx forwards /api/{API_PATH[svc]} to {svc}:{cfg['port']}",
-              re.search(rf"location /api/{API_PATH[svc]}\s*\{{\s*proxy_pass http://{svc}:{cfg['port']};", conf) is not None)
+        for prefix in API_PATHS[svc]:
+            check(f"{tag} nginx forwards /api/{prefix} to {svc}:{cfg['port']}",
+                  re.search(rf"location /api/{prefix}\s*\{{\s*proxy_pass http://{svc}:{cfg['port']};", conf) is not None)
     check(f"{tag} nginx has its own /healthz location", "location = /healthz" in conf)
     conf_no_comments = re.sub(r"(?m)^\s*#.*$", "", conf)   # comments may mention 'actuator' on purpose
     check(f"{tag} nginx never forwards actuator endpoints", "actuator" not in conf_no_comments)
@@ -281,6 +296,17 @@ def main():
           o["SERVICES_USER_URL"]["value"] == f"http://user-service:{SERVICES['user-service']['port']}")
     check("[order-service] SERVICES_PRODUCT_URL = http://product-service:8082",
           o["SERVICES_PRODUCT_URL"]["value"] == f"http://product-service:{SERVICES['product-service']['port']}")
+    order_api = show("order-service", "order-service/API.md")
+    user_api = show("user-service", "user-service/API.md")
+    product_api = show("product-service", "product-service/API.md")
+    check("[user-service] documents the trusted minimal customer detail endpoint",
+          "GET /internal/users/{id}" in user_api and "{id,name,email,active}" in user_api)
+    check("[order-service] consumes trusted customer details for admin views",
+          "customer:{id,name,email,active}" in order_api and "SERVICES_USER_URL" in order_api)
+    check("[product-service] documents inactive product listing and reactivation",
+          "GET /products/admin/inactive" in product_api and "PATCH /products/{id}/reactivate" in product_api)
+    check("[product-service] documents stock reservation reaper and lease",
+          "scheduled reaper" in product_api and "RESERVATION_LEASE_MS" in product_api)
 
     # --- main branch ---------------------------------------------------------
     main_files = tree("main")
@@ -288,7 +314,8 @@ def main():
                      "k8s/mysql/mysql-statefulset.yaml", "k8s/mysql/mysql-service.yaml",
                      "k8s/mysql/mysql-init-configmap.yaml", "aws/jenkins-iam-policy.json",
                      "aws/ecr-lifecycle-policy.json", "scripts/create-ecr-repos.sh",
-                     "local/docker-compose.yml", "local/init-databases.sh", "docs/ARCHITECTURE.md"]:
+                     "local/docker-compose.yml", "local/init-databases.sh", "scripts/create-k8s-secrets.sh",
+                     "docs/ARCHITECTURE.md"]:
         check(f"[main] has {required}", required in main_files)
     check("[main] contains no service source code",
           not any(f.startswith(tuple(f"{s}/" for s in [*SERVICES, "frontend"])) for f in main_files))
@@ -329,6 +356,16 @@ def main():
     check("[main] README mentions Script Path frontend/Jenkinsfile", "frontend/Jenkinsfile" in readme)
     check("[main] create-ecr-repos.sh creates all four repositories",
           "for service in user-service product-service order-service frontend; do" in show("main", "scripts/create-ecr-repos.sh"))
+    secret_script = show("main", "scripts/create-k8s-secrets.sh")
+    check("[main] secret helper requires shared JWT_SECRET and SERVICE_API_KEY",
+          all(name in secret_script for name in ["JWT_SECRET", "SERVICE_API_KEY", "shopsphere-app-secrets"]))
+    compose = show("main", "local/docker-compose.yml")
+    check("[main] Compose defines all five runtime services and persistent MySQL data",
+          all(f"  {name}:" in compose for name in ["mysql", *SERVICES, "frontend"])
+          and "mysql-data:/var/lib/mysql" in compose and "mysql-data:" in compose)
+    check("[main] Compose shares the JWT/service keys with all three backends",
+          compose.count("${JWT_SECRET:?Set a shared JWT_SECRET") == 3
+          and compose.count("${SERVICE_API_KEY:?Set a shared SERVICE_API_KEY") == 3)
 
     # --- report --------------------------------------------------------------
     failed = [r for r in results if not r[0]]

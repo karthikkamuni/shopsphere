@@ -122,7 +122,7 @@ The app has authenticated USER and ADMIN workflows; frontend guards only improve
 | Build | Maven (Spring Boot parent POM, `finalName` = artifactId → `target/<service>.jar`) |
 | Database | MySQL 8.4 (H2 in-memory for unit tests only) |
 | Container | Docker, base image `eclipse-temurin:21-jre-alpine`, non-root UID 10001 |
-| Frontend | React 19, Vite 8, Tailwind CSS 4, Vitest + Testing Library (Node 22.12 or newer) |
+| Frontend | React 19, Vite 8, Tailwind CSS 4, Vitest + Testing Library (Node 22.22.2 or newer) |
 | Web server | nginx (`nginxinc/nginx-unprivileged`, non-root UID 101): serves the built site and proxies `/api` |
 | CI | Jenkins, Multibranch Pipeline, declarative Jenkinsfile |
 | Registry | Amazon ECR (one repository per branch, immutable tags) |
@@ -264,7 +264,7 @@ Service branches: see [section 4](#4-git-branch-strategy).
 
 ## 6. Local application execution
 
-Prerequisites: Git, Docker Engine with Compose, Java 21 and Maven 3.9+ (for building the backend images), Node 22.12+ (for building the frontend image).
+Prerequisites: Git, Docker Engine with Compose, Java 21 and Maven 3.9+ (for building the backend images), Node 22.22.2+ (for building the frontend image).
 
 The four applications live on separate branches. Create local worktrees and build the images from each branch's service directory:
 
@@ -392,7 +392,7 @@ writes `dist/` into the workspace and `docker build .` reads it from the same di
 | Git | optional | **✔** | Used for `checkout scm` |
 | JDK **21** for building | – | **✔** | Auto-installed per build via the `jdk21` tool (see 8.3) or preinstalled |
 | Maven 3.9+ | – | **✔** | Auto-installed via the `maven-3` tool or preinstalled |
-| Node.js 22.12+ (frontend job only) | – | **✔** | Auto-installed via the NodeJS plugin tool `node-22`, or preinstalled |
+| Node.js 22.22.2+ (frontend job only) | – | **✔** | Auto-installed via the NodeJS plugin tool `node-22`, or preinstalled |
 | Docker Engine (daemon + CLI) | – | **✔** | The build agent runs `docker build/push` |
 | AWS CLI v2 | – | **✔** | `aws ecr …`, `aws eks update-kubeconfig` |
 | `kubectl` | – | **✔** | Within one minor version of the cluster |
@@ -469,7 +469,7 @@ The names must match the Jenkinsfile **exactly**:
   (Or untick auto-install and give `JAVA_HOME` of a JDK 21 already on the agent.)
 * **Maven** → Add Maven → Name `maven-3` → Install automatically → a 3.9.x version.
 * **NodeJS** (only for the frontend job) → Add NodeJS → Name `node-22` → Install automatically → a 22.x version
-  that is 22.12 or newer.
+  that is 22.22.2 or newer.
 * **Git** → the default `git` on the agent's PATH is fine.
 
 Auto-installed tools are downloaded **onto the agent** the first time a build needs them, so the agent
@@ -902,7 +902,7 @@ Start with the **first red stage** in the Jenkins console log; later errors are 
 | Symptom | Cause and fix |
 |---------|---------------|
 | `Tool type "nodejs" does not have an install of "node-22" configured`, or `nodejs` is an unknown tool | Install the *NodeJS* plugin and add a NodeJS tool named exactly `node-22` (Manage Jenkins → Tools) |
-| `npm ci` fails with "not in sync" or an engine/version error | `package-lock.json` was not committed, or the agent's Node is older than 22.12. Use the `node-22` tool |
+| `npm ci` fails with "not in sync" or an engine/version error | `package-lock.json` was not committed, or the agent's Node is older than 22.22.2. Use the `node-22` tool |
 | Frontend pod `CrashLoopBackOff`, logs show `host not found in upstream "…-service"` | nginx started before one of the three Services existed. Deploy user, product and order first, then `kubectl -n shopsphere rollout restart deployment/frontend` |
 | The page loads but a column says "unreachable", or the browser shows `502 Bad Gateway` for `/api/…` | That backend has no Ready pods, or its Service was deleted and recreated (nginx remembers the old IP): fix the backend, then `kubectl -n shopsphere rollout restart deployment/frontend` |
 | `kubectl get service frontend` shows `<pending>` for more than about 5 minutes | `kubectl -n shopsphere describe service frontend`: the events name the reason (usually load balancer permissions or subnets) |
