@@ -19,9 +19,11 @@ import java.util.*;
   Sort s="price,asc".equals(sort)?Sort.by("price"):"price,desc".equals(sort)?Sort.by("price").descending():Sort.by("name");
   return products.findByActiveTrue(PageRequest.of(Math.max(0,page),size,s)).map(ProductResponse::from);}
  public ProductResponse get(Long id){return ProductResponse.from(active(id));}
+ public List<ProductResponse> inactive(){return products.findByActiveFalseOrderByNameAsc().stream().map(ProductResponse::from).toList();}
  @Transactional public ProductResponse create(ProductRequest r){return ProductResponse.from(products.save(new Product(r)));}
  @Transactional public ProductResponse update(Long id,ProductRequest r){Product p=active(id);p.update(r);return ProductResponse.from(p);}
  @Transactional public ProductResponse deactivate(Long id){Product p=active(id);p.setActive(false);return ProductResponse.from(p);}
+ @Transactional public ProductResponse reactivate(Long id){Product p=products.findById(id).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Product "+id+" not found"));p.setActive(true);return ProductResponse.from(p);}
  @Transactional public ProductResponse stock(Long id,int stock){Product p=active(id);p.setStock(stock);return ProductResponse.from(p);}
  @Transactional public ProductResponse availability(Long id,boolean available){Product p=active(id);p.setAvailable(available);return ProductResponse.from(p);}
  @Transactional public ReservationResponse reserve(Long id,int qty,String key){
@@ -34,6 +36,17 @@ import java.util.*;
   if(commit){reservations.markCommitted(key);}
   else {int changed=reservations.markReleased(key);if(changed==0)changed=reservations.markRestocked(key);if(changed==1)products.returnStock(r.getProductId(),r.getQuantity());}
   return new ReservationResponse(key,reservations.findById(key).orElseThrow().getStatus());
+ }
+ @Transactional public int reconcileExpiredReservations(java.time.Instant cutoff){
+  var expired=reservations.findByStatusAndCreatedAtBefore("RESERVED",cutoff,PageRequest.of(0,100)).getContent();
+  int released=0;
+  for(StockReservation reservation:expired){
+   if(reservations.releaseExpired(reservation.getId(),cutoff)==1){
+    products.returnStock(reservation.getProductId(),reservation.getQuantity());
+    released++;
+   }
+  }
+  return released;
  }
  private Product active(Long id){return products.findById(id).filter(Product::isActive).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Product "+id+" not found"));}
 }

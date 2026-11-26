@@ -10,6 +10,7 @@ import java.util.List;
 
 public interface ProductRepository extends JpaRepository<Product, Long> {
     List<Product> findByActiveTrue();
+    List<Product> findByActiveFalseOrderByNameAsc();
     List<Product> findByActiveTrueAndNameContainingIgnoreCase(String name);
     List<Product> findByActiveTrueAndCategoryIgnoreCase(String category);
     List<Product> findByActiveTrueAndCategoryIgnoreCaseAndNameContainingIgnoreCase(String category,String name);

@@ -42,6 +42,10 @@ class ProductControllerTest {
   mvc.perform(put("/api/products/"+id).header("Authorization",admin()).contentType(MediaType.APPLICATION_JSON).content(body.replace("Test Product A","Test Product B"))).andExpect(status().isOk()).andExpect(jsonPath("$.name").value("Test Product B"));
   mvc.perform(delete("/api/products/"+id).header("Authorization",admin())).andExpect(status().isOk()).andExpect(jsonPath("$.active").value(false));
   mvc.perform(get("/api/products/"+id)).andExpect(status().isNotFound());
+  mvc.perform(get("/api/products/admin/inactive").header("Authorization","Bearer "+jwt("USER"))).andExpect(status().isForbidden());
+  mvc.perform(get("/api/products/admin/inactive").header("Authorization",admin())).andExpect(status().isOk()).andExpect(jsonPath("$[?(@.id=="+id+")]").exists());
+  mvc.perform(patch("/api/products/"+id+"/reactivate").header("Authorization",admin())).andExpect(status().isOk()).andExpect(jsonPath("$.active").value(true)).andExpect(jsonPath("$.stock").value(4));
+  mvc.perform(get("/api/products/"+id)).andExpect(status().isOk()).andExpect(jsonPath("$.name").value("Test Product B"));
  }
  @Test void userCanBrowseButCannotMutateCatalog()throws Exception{
   mvc.perform(get("/api/products").header("Authorization","Bearer "+jwt("USER"))).andExpect(status().isOk());
@@ -65,4 +69,5 @@ class ProductControllerTest {
   org.assertj.core.api.Assertions.assertThat(repo.findById(p.getId()).orElseThrow().getStock()).isEqualTo(1);
  }
  @Test void releaseAfterCommitRestocksExactlyOnce(){Product p=repo.save(new Product(new ProductRequest("Cancel Stock","test",new java.math.BigDecimal("9.99"),"Test",null,6,true)));String key=UUID.randomUUID().toString();service.reserve(p.getId(),2,key);service.settle(key,true);org.assertj.core.api.Assertions.assertThat(repo.findById(p.getId()).orElseThrow().getStock()).isEqualTo(4);org.assertj.core.api.Assertions.assertThat(service.settle(key,false).status()).isEqualTo("RESTOCKED");service.settle(key,false);org.assertj.core.api.Assertions.assertThat(repo.findById(p.getId()).orElseThrow().getStock()).isEqualTo(6);}
+ @Test void abandonedReservationsAreReleasedAndRestockedExactlyOnce(){Product p=repo.save(new Product(new ProductRequest("Expired Stock","test",new java.math.BigDecimal("9.99"),"Test",null,6,true)));String key=UUID.randomUUID().toString();service.reserve(p.getId(),2,key);java.time.Instant future=java.time.Instant.now().plusSeconds(5);org.assertj.core.api.Assertions.assertThat(service.reconcileExpiredReservations(future)).isPositive();org.assertj.core.api.Assertions.assertThat(repo.findById(p.getId()).orElseThrow().getStock()).isEqualTo(6);org.assertj.core.api.Assertions.assertThat(service.reconcileExpiredReservations(future)).isZero();org.assertj.core.api.Assertions.assertThat(service.settle(key,true).status()).isEqualTo("RELEASED");}
 }

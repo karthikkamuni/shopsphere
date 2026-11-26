@@ -18,6 +18,10 @@ contains `{id,name,description,price,category,imageUrl,stock,available,active,cr
 
 ## Admin management
 
+* `GET /products/admin/inactive` â€” lists inactive products for administrators.
+* `PATCH /products/{id}/reactivate` â€” reactivates a product without changing its stock, price,
+  availability flag or other administrator-managed fields.
+
 * `POST /products` — `201`; request `{name,description,price,category,imageUrl,stock,available}`.
   Category defaults to `General`, stock to zero and availability to true for old request bodies.
 * `PUT /products/{id}` — replace editable product fields.
@@ -44,8 +48,12 @@ Internal endpoints require `X-Service-Token: <SERVICE_API_KEY>`. Use a unique UU
 
 Order placement spans separate databases and therefore is a reservation/compensation flow,
 not a distributed ACID transaction: reserve stock, persist the order, commit the reservation;
-on order persistence failure release it. Expired `RESERVED` records require a future recovery
-job if process crashes occur between reservation and settlement.
+on order persistence failure release it. order-service retries settlement for persisted orders.
+product-service runs a scheduled reaper every 60 seconds and releases still-`RESERVED` records
+older than `RESERVATION_LEASE_MS` (default 3,600,000 ms / one hour). The state transition is a
+conditional database update, and stock is restored only by the worker that changes the reservation
+from `RESERVED` to `RELEASED`; repeated runs cannot restore it twice. This lease recovers reservations
+whose order-service process died before persisting an order.
 
 ## Initialization and configuration
 
@@ -57,3 +65,5 @@ Hibernate `ddl-auto=update` adds product metadata/version, catalog marker and re
   default in production; Kubernetes loads it from `shopsphere-app-secrets/JWT_SECRET`.
 * `SERVICE_API_KEY`: random internal-only shared service credential; Kubernetes loads it from
   `shopsphere-app-secrets/SERVICE_API_KEY`.
+* `RESERVATION_LEASE_MS`: abandoned reservation lease; default one hour. Keep order-service
+  reconciliation online and retrying well inside this window.
