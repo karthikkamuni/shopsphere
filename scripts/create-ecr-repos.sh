@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Creates the three ShopSphere ECR repositories (idempotent: safe to re-run).
+# Creates the four ShopSphere ECR repositories (idempotent: safe to re-run):
+# shopsphere-user-service, shopsphere-product-service, shopsphere-order-service, shopsphere-frontend
 #
 # Usage:
 #   export AWS_REGION=<your-region>     # e.g. the region of your EKS cluster
@@ -16,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POLICY_FILE="${SCRIPT_DIR}/../aws/ecr-lifecycle-policy.json"
 
-for service in user-service product-service order-service; do
+for service in user-service product-service order-service frontend; do
   repo="shopsphere-${service}"
 
   if aws ecr describe-repositories --repository-names "${repo}" --region "${AWS_REGION}" >/dev/null 2>&1; then

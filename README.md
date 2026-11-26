@@ -1,16 +1,16 @@
 # ShopSphere – Microservices CI/CD on Jenkins, Docker, Amazon ECR and Amazon EKS
 
-A small e-commerce backend made of **three independent Spring Boot microservices**, built to practise
+A small e-commerce app made of **three independent Spring Boot microservices and a React web UI**, built to practise
 one deployment path from start to finish:
 
 ```
-GitHub  →  Jenkins Multibranch Pipeline  →  Maven  →  Docker  →  Amazon ECR  →  Amazon EKS
+GitHub  →  Jenkins Multibranch Pipeline  →  Maven / npm  →  Docker  →  Amazon ECR  →  Amazon EKS
 ```
 
 The business logic is deliberately tiny. The point is the pipeline.
 
 > **This `main` branch holds documentation, Kubernetes base manifests (namespace, MySQL) and helper
-> scripts only. The service source code lives on three other branches.** See [section 4](#4-git-branch-strategy).
+> scripts only. The source code lives on four other branches (three services and the web UI).** See [section 4](#4-git-branch-strategy).
 
 ---
 
@@ -43,18 +43,20 @@ Also read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (naming table, design n
 | **user-service** | Customer accounts | 8081 | `userdb` | `POST/GET /api/users`, `GET /api/users/{id}` |
 | **product-service** | Product catalogue | 8082 | `productdb` | `POST/GET /api/products`, `GET /api/products/{id}` |
 | **order-service** | Places orders; calls the other two services to validate the user and read the price | 8083 | `orderdb` | `POST/GET /api/orders`, `GET /api/orders/{id}` |
+| **frontend** | Web UI with one column per service; the only public entry point | 8080 in the container, 80 on the Service | – | serves the site and forwards `/api/users`, `/api/products`, `/api/orders` to the three services |
 
-Every service also exposes `GET /actuator/health` (plus `/actuator/health/liveness` and
+Every Spring Boot service also exposes `GET /actuator/health` (plus `/actuator/health/liveness` and
 `/actuator/health/readiness`, used by Kubernetes probes).
 
 What you will practise:
 
-* Jenkins **Multibranch Pipeline** branch discovery (one branch per service)
+* Jenkins **Multibranch Pipeline** branch discovery (one branch per service, plus one for the web UI)
 * A declarative Jenkinsfile with nine stages, credentials binding and unique image tags
-* Building a JAR with Maven and packaging it with Docker
+* Building a JAR with Maven (services) or a static site with npm (UI) and packaging it with Docker
 * Pushing images to **Amazon ECR**
 * Rolling updates on **Amazon EKS** with `kubectl`, probes, resource limits and rollback
 * Service-to-service communication inside a cluster, and MySQL persistence on an EBS volume
+* Exposing exactly one public entry point (the UI behind a load balancer) while everything else stays private
 
 Deliberately **not** used: Terraform, Helm, Argo CD, service mesh, GitOps.
 
@@ -62,21 +64,25 @@ Deliberately **not** used: Terraform, Helm, Argo CD, service mesh, GitOps.
 
 ## 2. Architecture diagram
 
-Runtime (inside EKS, namespace `shopsphere`). Nothing is exposed to the internet.
+Runtime (inside EKS, namespace `shopsphere`). **Only the frontend is public.**
 
 ```
-        kubectl port-forward (your laptop, for testing only)
-                         │
- ┌───────────────────────┼─────────────────────── namespace: shopsphere ───────────┐
- │                       ▼                                                          │
- │   Service order-service :8083 ──► 2 pods ──┬─ http://user-service:8081 ──► 2 pods│
- │                                     │      └─ http://product-service:8082 ► 2 pods
- │                                     │ JDBC          │ JDBC            │ JDBC    │
- │                                     ▼               ▼                 ▼         │
- │                             Service mysql :3306  (databases orderdb, userdb, productdb)
- │                                     │                                           │
- │                             StatefulSet mysql ──► PVC ──► EBS gp3 volume        │
- └──────────────────────────────────────────────────────────────────────────────────┘
+ Internet ─► AWS load balancer ─► Service frontend :80 ─► nginx pods (2)
+                                                               │  serves the React site and forwards
+                                                               │  /api/users  /api/products  /api/orders
+ ┌─────────────────────────── namespace: shopsphere ───────────┼───────────────────────┐
+ │        ┌─────────────────────────────────┬──────────────────┘                       │
+ │        ▼                                 ▼                       ▼                    │
+ │  user-service :8081              product-service :8082    order-service :8083         │
+ │  (2 pods, ClusterIP)             (2 pods, ClusterIP)      (2 pods, ClusterIP)         │
+ │        ▲                                 ▲                       │                    │
+ │        └───────── HTTP (cluster DNS) ────┴───────────────────────┘  order-service     │
+ │        │ JDBC                            │ JDBC                  │ JDBC   calls both   │
+ │        └───────────────┬─────────────────┴───────────────────────┘                    │
+ │                        ▼                                                              │
+ │               Service mysql :3306  (databases userdb, productdb, orderdb)             │
+ │               StatefulSet mysql ──► PVC ──► EBS gp3 volume                            │
+ └───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 CI/CD:
@@ -90,15 +96,20 @@ CI/CD:
                                                     shopsphere-user-service:<sha>-b<n>
 ```
 
+The `frontend` branch follows the same flow, with `npm ci`, `npm run build` and `npm test` instead of Maven.
+
 A larger diagram and a naming table are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 **How the services talk to each other.** Each service has a `ClusterIP` Service. Kubernetes DNS turns
 the name `user-service` into that Service's internal IP, so `order-service` simply calls
 `http://user-service:8081`. The address is not written in Java code: it comes from the environment
 variable `SERVICES_USER_URL` (and `SERVICES_PRODUCT_URL`). Locally those default to `localhost`.
-`ClusterIP` Services have no public address, so nothing is reachable from outside the cluster; you
-test through `kubectl port-forward`. A real system would add one public entry point (ALB Ingress or
-an API gateway) – left out on purpose.
+The three backend Services are `ClusterIP`, so they have no public address. The one public entry point
+is the **frontend**: its Service is a `LoadBalancer`, and its nginx container forwards only `/api/users`,
+`/api/products` and `/api/orders` to the backends (the `/actuator` endpoints are not forwarded). The browser
+calls relative URLs such as `/api/users`, so no CORS configuration is needed. A larger real system would use an
+ALB Ingress or API gateway with HTTPS and a login – left out on purpose. This project has no login, so
+restrict the load balancer to your own IP address ([section 12.5](#125-open-the-web-ui)).
 
 ---
 
@@ -111,8 +122,10 @@ an API gateway) – left out on purpose.
 | Build | Maven (Spring Boot parent POM, `finalName` = artifactId → `target/<service>.jar`) |
 | Database | MySQL 8.4 (H2 in-memory for unit tests only) |
 | Container | Docker, base image `eclipse-temurin:21-jre-alpine`, non-root UID 10001 |
+| Frontend | React 19, Vite 8, Tailwind CSS 4, Vitest + Testing Library (Node 22.12 or newer) |
+| Web server | nginx (`nginxinc/nginx-unprivileged`, non-root UID 101): serves the built site and proxies `/api` |
 | CI | Jenkins, Multibranch Pipeline, declarative Jenkinsfile |
-| Registry | Amazon ECR (one repository per service, immutable tags) |
+| Registry | Amazon ECR (one repository per branch, immutable tags) |
 | Orchestration | Amazon EKS (Kubernetes), `kubectl` |
 
 > **Spring Boot 3.5 support note.** 3.5.16 (June 2026) was announced as the **last open-source release
@@ -123,7 +136,7 @@ an API gateway) – left out on purpose.
 
 ## 4. Git branch strategy
 
-One repository, **four branches with different content** (the service branches are *orphan* branches –
+One repository, **five branches with different content** (the service branches are *orphan* branches –
 they share no history with `main`, so each contains only its own files):
 
 | Branch | Contains | Jenkins job builds it? |
@@ -132,6 +145,7 @@ they share no history with `main`, so each contains only its own files):
 | `user-service` | only the `user-service/` directory | Yes – job for user-service |
 | `product-service` | only the `product-service/` directory | Yes – job for product-service |
 | `order-service` | only the `order-service/` directory | Yes – job for order-service |
+| `frontend` | only the `frontend/` directory (React web UI) | Yes – job for frontend |
 
 Layout of every service branch (example: `user-service`):
 
@@ -148,12 +162,26 @@ user-service/
     service.yaml
 ```
 
+Layout of the `frontend` branch:
+
+```
+frontend/
+  package.json, package-lock.json   dependency versions, pinned by the lock file
+  vite.config.js, index.html, public/
+  src/                              React app (components, api.js) and tests (App.test.jsx)
+  nginx.conf                        serves the site and proxies /api to the three services
+  Dockerfile, .dockerignore, Jenkinsfile
+  k8s/
+    deployment.yaml
+    service.yaml                    type LoadBalancer: the only public Service
+```
+
 Why this is good for learning: pushing a commit to `product-service` triggers **only** the product
 pipeline, and that pipeline can only deploy `product-service`.
 
 ### Create the branches and push them (exact commands)
 
-If you received this repository already prepared (all four branches exist locally), you only need
+If you received this repository already prepared (all five branches exist locally), you only need
 **step 3**.
 
 ```bash
@@ -165,11 +193,11 @@ git rm -rf .                               # empty the working tree
 # ...copy the user-service/ directory into the repository root...
 git add user-service
 git commit -m "user-service: initial Spring Boot service, Dockerfile, Jenkinsfile, k8s manifests"
-# repeat for product-service and order-service; main was created first with the docs
+# repeat for product-service, order-service and frontend; main was created first with the docs
 
-# 3. Connect to GitHub and push all four branches
+# 3. Connect to GitHub and push all five branches
 git remote add origin https://github.com/<your-github-username>/shopsphere.git
-git push -u origin main user-service product-service order-service
+git push -u origin main user-service product-service order-service frontend
 
 # 4. Check
 git branch -a
@@ -182,7 +210,7 @@ first push (each branch has exactly one commit, so this is safe), set your ident
 ```bash
 git config user.name  "Your Name"
 git config user.email "you@example.com"
-for b in main user-service product-service order-service; do
+for b in main user-service product-service order-service frontend; do
   git checkout "$b" && git commit --amend --reset-author --no-edit
 done
 git checkout main
@@ -223,7 +251,7 @@ aws/
   jenkins-iam-policy.json     least-privilege IAM policy for the Jenkins user
   ecr-lifecycle-policy.json   keep the 10 newest images per repository
 scripts/
-  create-ecr-repos.sh         creates the three ECR repositories
+  create-ecr-repos.sh         creates the four ECR repositories
   check_consistency.py        cross-branch consistency checker
 local/
   docker-compose.yml          MySQL for local runs
@@ -289,6 +317,32 @@ curl -s localhost:8083/api/orders
 cd user-service && mvn test
 ```
 
+**The web UI** (branch `frontend`; needs Node 22.12 or newer):
+
+```bash
+git worktree add ../shopsphere-frontend frontend
+cd ../shopsphere-frontend/frontend
+npm ci            # installs exactly the versions in package-lock.json
+npm test          # 7 tests, no backend needed
+npm run dev       # http://localhost:5173
+```
+
+With the three services running, open <http://localhost:5173>. The dev server forwards `/api/users` to
+`localhost:8081`, `/api/products` to `localhost:8082` and `/api/orders` to `localhost:8083` (see
+`vite.config.js`), the same job nginx does in Kubernetes. If a service is not running, its column shows
+"unreachable" with a *Try again* button.
+
+**Running the services from Spring Tool Suite (STS):**
+
+1. Window → Preferences → Java → Installed JREs: add your JDK 21 and tick it.
+2. File → Import → Maven → Existing Maven Projects: pick each worktree folder
+   (`shopsphere-user/user-service`, `shopsphere-product/product-service`, `shopsphere-order/order-service`).
+   If a project shows red errors afterwards: right-click → Maven → Update Project.
+3. Right-click a project → Run As → JUnit Test (no MySQL needed).
+4. Right-click a project → Run As → Run Configurations → Spring Boot App → *Environment* tab: add
+   `SPRING_DATASOURCE_USERNAME` = `shopsphere` and `SPRING_DATASOURCE_PASSWORD` = your app password. Then run.
+   The ports (8081, 8082, 8083) differ, so all three run together.
+
 Stop MySQL and delete its data: `docker compose -f local/docker-compose.yml down -v`.
 
 ---
@@ -339,6 +393,38 @@ docker run --rm -p 8081:8081 \
 * If the JAR does not exist, the build fails with `COPY failed: file not found` – the pipeline checks
   for it first and prints a clearer message.
 
+### The frontend image
+
+Same idea, different build tool: **npm builds the site on the Jenkins agent first** (`dist/`), and the
+Dockerfile only packages the result.
+
+```bash
+cd frontend                         # on branch frontend
+npm ci && npm run build             # creates dist/
+docker build -t shopsphere-frontend:local .
+
+# nginx looks up the service names when it starts, so it needs names to find. Here they point at the
+# services running on your own machine (for example from STS). Needs Docker 20.10 or newer.
+docker run --rm -p 8080:8080 \
+  --add-host=user-service:host-gateway \
+  --add-host=product-service:host-gateway \
+  --add-host=order-service:host-gateway \
+  shopsphere-frontend:local
+# open http://localhost:8080
+```
+
+| Line | Reason |
+|------|--------|
+| `FROM nginxinc/nginx-unprivileged:stable-alpine` | Official nginx variant that runs as a non-root user (UID 101), keeps its pid and temp files in `/tmp` and listens on 8080. Its default entrypoint starts nginx, so no `CMD` is needed |
+| `COPY nginx.conf /etc/nginx/conf.d/default.conf` | Serves the site and proxies `/api/users`, `/api/products`, `/api/orders` to the three services |
+| `COPY dist/ /usr/share/nginx/html/` | The built site |
+| `USER 101`, `EXPOSE 8080` | Non-root; the Kubernetes Service maps port 80 to 8080 |
+| `HEALTHCHECK … /healthz` | nginx answers `/healthz` itself, so the check does not depend on the backends |
+
+The build context is the `frontend/` directory and `.dockerignore` lets only `dist/` and `nginx.conf` in:
+`node_modules` and the source never enter the image. As with the JAR, Jenkins does not copy anything: `npm run build`
+writes `dist/` into the workspace and `docker build .` reads it from the same directory on the same agent.
+
 ---
 
 ## 8. Jenkins setup
@@ -353,6 +439,7 @@ docker run --rm -p 8081:8081 \
 | Git | optional | **✔** | Used for `checkout scm` |
 | JDK **21** for building | – | **✔** | Auto-installed per build via the `jdk21` tool (see 8.3) or preinstalled |
 | Maven 3.9+ | – | **✔** | Auto-installed via the `maven-3` tool or preinstalled |
+| Node.js 22.12+ (frontend job only) | – | **✔** | Auto-installed via the NodeJS plugin tool `node-22`, or preinstalled |
 | Docker Engine (daemon + CLI) | – | **✔** | The build agent runs `docker build/push` |
 | AWS CLI v2 | – | **✔** | `aws ecr …`, `aws eks update-kubeconfig` |
 | `kubectl` | – | **✔** | Within one minor version of the cluster |
@@ -417,6 +504,7 @@ dedicated, disposable build agent for this project.
 | **CloudBees AWS Credentials** (`aws-credentials`) | The "AWS Credentials" credential kind and `AmazonWebServicesCredentialsBinding` used in the Jenkinsfiles |
 | Maven Integration | The `maven` tool type used by `tools { maven 'maven-3' }` |
 | Eclipse Temurin installer | Optional – lets Jenkins download JDK 21 automatically |
+| NodeJS | The `nodejs` tool used by the frontend Jenkinsfile (`tools { nodejs 'node-22' }`) |
 | Timestamper | `timestamps()` option |
 | JUnit | Test reports (normally installed with the suggested plugins) |
 
@@ -427,6 +515,8 @@ The names must match the Jenkinsfile **exactly**:
 * **JDK** → Add JDK → Name `jdk21` → Install automatically → *Install from adoptium.net* → a `jdk-21.x` version.
   (Or untick auto-install and give `JAVA_HOME` of a JDK 21 already on the agent.)
 * **Maven** → Add Maven → Name `maven-3` → Install automatically → a 3.9.x version.
+* **NodeJS** (only for the frontend job) → Add NodeJS → Name `node-22` → Install automatically → a 22.x version
+  that is 22.12 or newer.
 * **Git** → the default `git` on the agent's PATH is fine.
 
 Auto-installed tools are downloaded **onto the agent** the first time a build needs them, so the agent
@@ -457,11 +547,11 @@ add *Webhooks* / *Metadata* read as GitHub Branch Source requires). ID e.g. `git
 
 ## 9. Multibranch Pipeline configuration
 
-### Why three Multibranch jobs?
+### Why one Multibranch job per branch?
 
 A Multibranch job has **one Script Path for all its branches**. Because each service's Jenkinsfile lives
 at a different path (`user-service/Jenkinsfile`, `product-service/Jenkinsfile`,
-`order-service/Jenkinsfile`), you create **one Multibranch job per service**. Each job scans the whole
+`order-service/Jenkinsfile`, `frontend/Jenkinsfile`), you create **one Multibranch job per branch** (four jobs). Each job scans the whole
 repository, **discovers every branch**, and builds only the branches that contain *its* Jenkinsfile.
 Branches without that file are reported as not meeting the criteria and are skipped – that is
 branch discovery in action.
@@ -471,6 +561,7 @@ branch discovery in action.
 | `shopsphere-user-service` | `user-service/Jenkinsfile` | `user-service` |
 | `shopsphere-product-service` | `product-service/Jenkinsfile` | `product-service` |
 | `shopsphere-order-service` | `order-service/Jenkinsfile` | `order-service` |
+| `shopsphere-frontend` | `frontend/Jenkinsfile` | `frontend` |
 
 ### Steps (repeat for each job)
 
@@ -505,8 +596,8 @@ rely on the periodic scan.
 |---|-------|--------------|
 | 1 | **Checkout** | `checkout scm`; builds tag `IMAGE_TAG = <8-char commit sha>-b<build number>` |
 | 2 | **Environment validation** | Checks `AWS_REGION`/`EKS_CLUSTER_NAME`, tools on the agent, Docker access (prints the agent OS user), required files |
-| 3 | **Maven build** | `mvn clean package -DskipTests` → `target/<service>.jar`, archived |
-| 4 | **Unit tests** | `mvn test`; JUnit results published |
+| 3 | **Maven build** (frontend: **Frontend build**) | `mvn clean package -DskipTests` → `target/<service>.jar`; frontend: `npm ci` + `npm run build` → `dist/`; archived |
+| 4 | **Unit tests** | `mvn test` (frontend: `npm test`); JUnit results published |
 | 5 | **Docker image build** | `docker build -t shopsphere-<service>:<tag> .` with commit/build labels |
 | 6 | **AWS authentication** | Gets the account ID, checks the ECR repository exists, `docker login` to ECR, `aws eks update-kubeconfig`, checks deploy permission in the namespace |
 | 7 | **Push image to ECR** | Tags with the full ECR URI and pushes; prints the image digest |
@@ -533,11 +624,12 @@ Other design points:
 
 ### 10.1 Create the repositories
 
-Three repositories, one per service:
+Four repositories, one per branch:
 
 * `shopsphere-user-service`
 * `shopsphere-product-service`
 * `shopsphere-order-service`
+* `shopsphere-frontend`
 
 ```bash
 export AWS_REGION=<your-region>
@@ -627,7 +719,7 @@ eksctl create cluster \
 kubectl get nodes
 ```
 
-Sizing: with 2 replicas per service the workload requests about 1.75 vCPU and 2.8 GiB of memory
+Sizing: with 2 replicas of each of the four apps the workload requests about 1.85 vCPU and 2.9 GiB of memory
 in total (plus a rolling-update surge pod), which fits two `t3.medium` nodes. If pods stay `Pending`
 with `Insufficient cpu/memory`, use bigger nodes or set `replicas: 1`. If your account/region does not
 offer that instance type, choose another general-purpose type.
@@ -713,7 +805,9 @@ kubectl -n shopsphere get pvc                      # data-mysql-0 must be Bound
 kubectl -n shopsphere exec mysql-0 -- sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES"'
 #   → userdb, productdb and orderdb are listed
 
-# 4. Deploy the services: push each branch / run each Jenkins job (section 9), or build one by hand.
+# 4. Deploy the apps: run the Jenkins jobs (section 9) for user-service, product-service and order-service
+#    FIRST, wait until their pods are Ready, and run the frontend job LAST (nginx needs the three Service
+#    names to exist when it starts).
 ```
 
 ### 12.2 Database configuration and persistence – explained
@@ -749,6 +843,10 @@ kubectl -n shopsphere exec mysql-0 -- sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWOR
 | ECR image | `image: __IMAGE_URI__`, replaced by the pipeline with the exact ECR image of this build |
 | Security | non-root, no privilege escalation, read-only root filesystem (writable `/tmp` via `emptyDir`), all capabilities dropped |
 
+The **frontend** manifests differ in four ways: the container listens on 8080 (unprivileged nginx), its probes call
+`/healthz` (they do not depend on the backends), it needs no environment variables, and its Service is
+`type: LoadBalancer`. The three backend Services stay `ClusterIP`.
+
 Why a placeholder instead of `kubectl set image`? The manifest in Git always matches what is applied, and
 the account ID/region stay out of Git. The pipeline renders it with `sed` and applies it. To deploy by hand:
 
@@ -779,7 +877,25 @@ kubectl -n shopsphere run dns-test --rm -it --restart=Never --image=curlimages/c
     curl -s http://user-service:8081/actuator/health
 ```
 
-### 12.5 Rollouts and rollback
+### 12.5 Open the web UI
+
+The frontend job prints the address in its last stage. You can also read it at any time:
+
+```bash
+kubectl -n shopsphere get service frontend
+# EXTERNAL-IP shows <pending> for a few minutes, then an address ending in .elb.amazonaws.com
+```
+
+Open `http://<that address>`. Add a user and a product, then place an order. Each column shows whether its
+service is reachable.
+
+* **No public address wanted?** Skip the load balancer: `kubectl -n shopsphere port-forward svc/frontend 8080:80`, then open <http://localhost:8080>.
+* **There is no login.** While the load balancer exists, anyone who knows the address can add data. Limit it to your
+  own IP address by uncommenting `loadBalancerSourceRanges` in `frontend/k8s/service.yaml` (commit it to the
+  `frontend` branch), or delete the Service when you stop practising.
+* The address is plain `http`. HTTPS needs a certificate and an Ingress or NLB listener, which is out of scope here.
+
+### 12.6 Rollouts and rollback
 
 ```bash
 kubectl -n shopsphere rollout history deployment/user-service     # change-cause shows the Jenkins build
@@ -843,6 +959,17 @@ Start with the **first red stage** in the Jenkins console log; later errors are 
 | `rollout status` times out, pipeline rolls back | Read the diagnostics printed by the failed stage; the usual cause is the database or a bad image. On the very first deploy there is no previous revision, so the rollback is a no-op |
 | order-service returns `503 … is unavailable` | user-service or product-service not ready, or `SERVICES_*_URL` wrong: `kubectl -n shopsphere get pods` and `kubectl -n shopsphere exec deploy/order-service -- env \| grep SERVICES` |
 
+### Frontend
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| `Tool type "nodejs" does not have an install of "node-22" configured`, or `nodejs` is an unknown tool | Install the *NodeJS* plugin and add a NodeJS tool named exactly `node-22` (Manage Jenkins → Tools) |
+| `npm ci` fails with "not in sync" or an engine/version error | `package-lock.json` was not committed, or the agent's Node is older than 22.12. Use the `node-22` tool |
+| Frontend pod `CrashLoopBackOff`, logs show `host not found in upstream "…-service"` | nginx started before one of the three Services existed. Deploy user, product and order first, then `kubectl -n shopsphere rollout restart deployment/frontend` |
+| The page loads but a column says "unreachable", or the browser shows `502 Bad Gateway` for `/api/…` | That backend has no Ready pods, or its Service was deleted and recreated (nginx remembers the old IP): fix the backend, then `kubectl -n shopsphere rollout restart deployment/frontend` |
+| `kubectl get service frontend` shows `<pending>` for more than about 5 minutes | `kubectl -n shopsphere describe service frontend`: the events name the reason (usually load balancer permissions or subnets) |
+| The address opens but times out | `loadBalancerSourceRanges` does not include your IP address, or your network blocks outgoing port 80 |
+
 Useful commands: `kubectl -n shopsphere describe pod <pod>`, `kubectl -n shopsphere logs <pod> --previous`,
 `kubectl -n shopsphere get events --sort-by=.lastTimestamp`, `kubectl auth can-i --list -n shopsphere`.
 
@@ -854,8 +981,10 @@ Delete things in this order so nothing keeps billing.
 
 ```bash
 # 1. Kubernetes objects (and the EBS volume behind MySQL)
-kubectl delete namespace shopsphere                    # removes deployments, services, MySQL, PVC
+kubectl delete namespace shopsphere                    # removes deployments, services (incl. the frontend load balancer), MySQL, PVC
 kubectl get pv                                         # should be empty; the gp3 class uses reclaimPolicy: Delete
+#    Wait until the frontend's load balancer has disappeared (EC2 console -> Load Balancers) before deleting the
+#    cluster: a leftover load balancer can block deletion of the VPC.
 kubectl delete storageclass shopsphere-gp3
 
 # 2. Cluster (also removes node group and its CloudFormation stacks; ~10-15 minutes)
@@ -866,7 +995,7 @@ aws iam detach-role-policy --role-name AmazonEKS_EBS_CSI_DriverRole \
 aws iam delete-role --role-name AmazonEKS_EBS_CSI_DriverRole
 
 # 3. ECR repositories and their images
-for s in user-service product-service order-service; do
+for s in user-service product-service order-service frontend; do
   aws ecr delete-repository --repository-name "shopsphere-$s" --force --region "$AWS_REGION"
 done
 
@@ -878,7 +1007,7 @@ aws iam detach-user-policy --user-name jenkins-shopsphere \
 aws iam delete-policy --policy-arn "arn:aws:iam::${ACCOUNT_ID}:policy/ShopSphereJenkins"
 aws iam delete-user --user-name jenkins-shopsphere
 
-# 5. Jenkins: delete the three Multibranch jobs and the aws-shopsphere credential
+# 5. Jenkins: delete the four Multibranch jobs and the aws-shopsphere credential
 # 6. Local: docker compose -f local/docker-compose.yml down -v ; docker system prune -af
 ```
 

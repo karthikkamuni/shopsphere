@@ -14,6 +14,7 @@ Exit code 0 = every check passed, 1 = at least one failed.
 This script cannot prove that Maven, Docker, Jenkins or AWS work - it only
 catches typos and mismatches between files.
 """
+import json
 import re
 import subprocess
 import sys
@@ -37,6 +38,20 @@ EXPECTED_STAGES = [
     "Deploy to EKS",
     "Verify deployment",
 ]
+
+FRONTEND_STAGES = [
+    "Checkout",
+    "Environment validation",
+    "Frontend build",
+    "Unit tests",
+    "Docker image build",
+    "AWS authentication",
+    "Push image to ECR",
+    "Deploy to EKS",
+    "Verify deployment",
+]
+# URL prefix each backend answers under (the frontend's nginx forwards these)
+API_PATH = {"user-service": "users", "product-service": "products", "order-service": "orders"}
 
 results = []
 
@@ -88,7 +103,7 @@ def check_service(svc, cfg):
     check(f"[{svc}] Jenkinsfile tag contains the git commit sha", "IMAGE_TAG" in jf and "GIT_COMMIT_SHORT}-b" in jf)
     check(f"[{svc}] Jenkinsfile deploys only on branch '{svc}'", jf.count("env.BRANCH_NAME == env.SERVICE_NAME") == 4)
     check(f"[{svc}] Jenkinsfile only touches its own deployment",
-          all(other not in jf for other in SERVICES if other != svc))
+          all(other not in jf for other in [*SERVICES, "frontend"] if other != svc))
     secrets_found = re.findall(r"AKIA[0-9A-Z]{16}|\b\d{12}\b|\b[a-z]{2}-[a-z]+-\d\b|secret_?key\s*=\s*['\"][^'\"]+['\"]", jf)
     check(f"[{svc}] Jenkinsfile has no hard-coded account id / region / keys", not secrets_found, str(secrets_found))
 
@@ -154,10 +169,111 @@ def check_service(svc, cfg):
     return envs
 
 
+def check_frontend():
+    name, ecr, tag = "frontend", "shopsphere-frontend", "[frontend]"
+    files = tree(name)
+
+    # --- branch layout -------------------------------------------------------
+    top = sorted({f.split("/")[0] for f in files})
+    check(f"{tag} branch contains only the 'frontend/' directory", top == [name], f"top-level: {top}")
+    for required in ["package.json", "package-lock.json", "vite.config.js", "index.html", "nginx.conf",
+                     "Dockerfile", ".dockerignore", "Jenkinsfile", "src/App.jsx", "src/App.test.jsx",
+                     "k8s/deployment.yaml", "k8s/service.yaml"]:
+        check(f"{tag} has frontend/{required}", f"frontend/{required}" in files)
+    check(f"{tag} no node_modules, dist or test-results committed",
+          not any(re.search(r"/(node_modules|dist|test-results)/", f) for f in files))
+
+    # --- Jenkinsfile ---------------------------------------------------------
+    jf = show(name, "frontend/Jenkinsfile")
+    check(f"{tag} Jenkinsfile SERVICE_NAME is 'frontend'", "SERVICE_NAME       = 'frontend'" in jf)
+    check(f"{tag} Jenkinsfile ECR_REPOSITORY is '{ecr}'", f"ECR_REPOSITORY     = '{ecr}'" in jf)
+    check(f"{tag} Jenkinsfile K8S_NAMESPACE is '{NAMESPACE}'", f"K8S_NAMESPACE      = '{NAMESPACE}'" in jf)
+    stages = re.findall(r"stage\('([^']+)'\)", jf)
+    check(f"{tag} Jenkinsfile has the 9 required stages in order", stages == FRONTEND_STAGES, f"found: {stages}")
+    check(f"{tag} Jenkinsfile is declarative", jf.lstrip().startswith("//") and "pipeline {" in jf)
+    check(f"{tag} Jenkinsfile uses the NodeJS tool 'node-22'", "nodejs 'node-22'" in jf)
+    check(f"{tag} Jenkinsfile runs npm ci, npm run build and npm test",
+          all(cmd in jf for cmd in ("npm ci", "npm run build", "npm test")))
+    check(f"{tag} Jenkinsfile uses Jenkins credentials binding",
+          "AmazonWebServicesCredentialsBinding" in jf and "credentialsId" in jf)
+    check(f"{tag} Jenkinsfile tag contains the git commit sha", "IMAGE_TAG" in jf and "GIT_COMMIT_SHORT}-b" in jf)
+    check(f"{tag} Jenkinsfile deploys only on branch 'frontend'", jf.count("env.BRANCH_NAME == env.SERVICE_NAME") == 4)
+    check(f"{tag} Jenkinsfile never mentions the backend services", all(s not in jf for s in SERVICES))
+    secrets_found = re.findall(r"AKIA[0-9A-Z]{16}|\b\d{12}\b|\b[a-z]{2}-[a-z]+-\d\b|secret_?key\s*=\s*['\"][^'\"]+['\"]", jf)
+    check(f"{tag} Jenkinsfile has no hard-coded account id / region / keys", not secrets_found, str(secrets_found))
+
+    # --- package.json and lock file ------------------------------------------
+    pkg = json.loads(show(name, "frontend/package.json"))
+    check(f"{tag} package.json has build and test scripts",
+          pkg["scripts"].get("build") == "vite build" and pkg["scripts"].get("test") == "vitest run")
+    check(f"{tag} package.json requires Node >=22.12", pkg.get("engines", {}).get("node") == ">=22.12")
+    lock_root = json.loads(show(name, "frontend/package-lock.json"))["packages"][""]
+    check(f"{tag} package-lock.json declares the same dependencies as package.json (npm ci will accept it)",
+          {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+          == {**lock_root.get("dependencies", {}), **lock_root.get("devDependencies", {})})
+
+    # --- Dockerfile and .dockerignore ----------------------------------------
+    df = show(name, "frontend/Dockerfile")
+    check(f"{tag} Dockerfile uses the unprivileged nginx base image",
+          re.search(r"^FROM nginxinc/nginx-unprivileged:", df, re.M) is not None)
+    check(f"{tag} Dockerfile copies dist/ and nginx.conf",
+          "COPY dist/ /usr/share/nginx/html/" in df and "COPY nginx.conf /etc/nginx/conf.d/default.conf" in df)
+    check(f"{tag} Dockerfile exposes 8080 and runs as user 101",
+          re.search(r"^EXPOSE 8080$", df, re.M) is not None and re.search(r"^USER 101$", df, re.M) is not None)
+    check(f"{tag} .dockerignore only lets dist and nginx.conf in",
+          show(name, "frontend/.dockerignore").splitlines()[-3:] == ["*", "!dist", "!nginx.conf"])
+
+    # --- nginx.conf: proxy targets must match the real services ---------------
+    conf = show(name, "frontend/nginx.conf")
+    check(f"{tag} nginx listens on 8080", re.search(r"^\s*listen 8080;", conf, re.M) is not None)
+    for svc, cfg in SERVICES.items():
+        check(f"{tag} nginx forwards /api/{API_PATH[svc]} to {svc}:{cfg['port']}",
+              re.search(rf"location /api/{API_PATH[svc]}\s*\{{\s*proxy_pass http://{svc}:{cfg['port']};", conf) is not None)
+    check(f"{tag} nginx has its own /healthz location", "location = /healthz" in conf)
+    conf_no_comments = re.sub(r"(?m)^\s*#.*$", "", conf)   # comments may mention 'actuator' on purpose
+    check(f"{tag} nginx never forwards actuator endpoints", "actuator" not in conf_no_comments)
+    check(f"{tag} nginx falls back to index.html (single-page app)", "try_files $uri /index.html;" in conf)
+    check(f"{tag} nginx add_header only at server level (location-level add_header would drop the security headers)",
+          not re.search(r"^ {8,}add_header", conf, re.M))
+
+    # --- Deployment ----------------------------------------------------------
+    dep = yaml.safe_load(show(name, "frontend/k8s/deployment.yaml"))
+    spec = dep["spec"]
+    pod = spec["template"]["spec"]
+    c = pod["containers"][0]
+    port = c["ports"][0]
+    check(f"{tag} Deployment kind/name/namespace",
+          dep["kind"] == "Deployment" and dep["metadata"]["name"] == name and dep["metadata"]["namespace"] == NAMESPACE)
+    check(f"{tag} Deployment selector matches pod labels",
+          spec["selector"]["matchLabels"]["app"] == name and spec["template"]["metadata"]["labels"]["app"] == name)
+    check(f"{tag} container name is 'frontend' and image is the __IMAGE_URI__ placeholder",
+          c["name"] == name and c["image"] == "__IMAGE_URI__")
+    check(f"{tag} containerPort is 8080 (named 'http')", port["containerPort"] == 8080 and port["name"] == "http")
+    check(f"{tag} readiness and liveness probes use /healthz",
+          c["readinessProbe"]["httpGet"]["path"] == "/healthz" and c["livenessProbe"]["httpGet"]["path"] == "/healthz")
+    check(f"{tag} resource requests and limits set",
+          all(k in c["resources"]["requests"] for k in ("cpu", "memory"))
+          and all(k in c["resources"]["limits"] for k in ("cpu", "memory")))
+    check(f"{tag} runs as non-root user 101 with a read-only root filesystem and a writable /tmp",
+          pod["securityContext"]["runAsNonRoot"] is True and pod["securityContext"]["runAsUser"] == 101
+          and c["securityContext"]["readOnlyRootFilesystem"] is True
+          and any(m["mountPath"] == "/tmp" for m in c["volumeMounts"]))
+
+    # --- Service -------------------------------------------------------------
+    svc_y = yaml.safe_load(show(name, "frontend/k8s/service.yaml"))
+    check(f"{tag} Service name/namespace and type LoadBalancer (the only public Service)",
+          svc_y["metadata"]["name"] == name and svc_y["metadata"]["namespace"] == NAMESPACE
+          and svc_y["spec"]["type"] == "LoadBalancer")
+    check(f"{tag} Service selects 'frontend' and maps port 80 to the container's named port",
+          svc_y["spec"]["selector"] == {"app": name} and svc_y["spec"]["ports"][0]["port"] == 80
+          and svc_y["spec"]["ports"][0]["targetPort"] == port["name"])
+
+
 def main():
     envs = {}
     for svc, cfg in SERVICES.items():
         envs[svc] = check_service(svc, cfg)
+    check_frontend()
 
     # --- order-service -> other services (internal communication) ------------
     o = envs["order-service"]
@@ -175,7 +291,7 @@ def main():
                      "local/docker-compose.yml", "local/init-databases.sh", "docs/ARCHITECTURE.md"]:
         check(f"[main] has {required}", required in main_files)
     check("[main] contains no service source code",
-          not any(f.startswith(tuple(f"{s}/" for s in SERVICES)) for f in main_files))
+          not any(f.startswith(tuple(f"{s}/" for s in [*SERVICES, "frontend"])) for f in main_files))
 
     ns = yaml.safe_load(show("main", "k8s/00-namespace.yaml"))
     check("[main] namespace manifest is 'shopsphere'", ns["kind"] == "Namespace" and ns["metadata"]["name"] == NAMESPACE)
@@ -208,6 +324,11 @@ def main():
     for svc in SERVICES:
         check(f"[main] README mentions shopsphere-{svc}", f"shopsphere-{svc}" in readme)
         check(f"[main] README mentions Script Path {svc}/Jenkinsfile", f"{svc}/Jenkinsfile" in readme)
+
+    check("[main] README mentions shopsphere-frontend", "shopsphere-frontend" in readme)
+    check("[main] README mentions Script Path frontend/Jenkinsfile", "frontend/Jenkinsfile" in readme)
+    check("[main] create-ecr-repos.sh creates all four repositories",
+          "for service in user-service product-service order-service frontend; do" in show("main", "scripts/create-ecr-repos.sh"))
 
     # --- report --------------------------------------------------------------
     failed = [r for r in results if not r[0]]

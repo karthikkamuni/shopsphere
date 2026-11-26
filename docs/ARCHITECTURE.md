@@ -3,11 +3,16 @@
 ## 1. Runtime architecture (inside the EKS cluster)
 
 ```
-                          (nothing below is exposed to the internet)
-
+   Browser
+      │  http://<load-balancer-address>        (the ONLY public entry point)
+      ▼
  Namespace: shopsphere
  ┌──────────────────────────────────────────────────────────────────────────┐
- │                                                                          │
+ │  Service: frontend :80 (LoadBalancer) ──► Deployment frontend (2 pods)   │
+ │    nginx :8080 serves the React app and forwards only /api/users,        │
+ │    /api/products and /api/orders to the three Services below             │
+ │         │ (cluster DNS)                                                  │
+ │         ▼                                                                │
  │   Service: order-service :8083  ──►  Deployment order-service  (2 pods)  │
  │         │      │                          │                              │
  │         │      │ HTTP (cluster DNS)       │ JDBC                         │
@@ -27,6 +32,7 @@
 
 | Component | Kind | Port | Database | Calls |
 |-----------|------|------|----------|-------|
+| frontend | Deployment + **LoadBalancer** Service (80 → 8080) | 80 / 8080 | – | `user-service:8081`, `product-service:8082`, `order-service:8083` (through nginx) |
 | user-service | Deployment + ClusterIP Service | 8081 | `userdb` | – |
 | product-service | Deployment + ClusterIP Service | 8082 | `productdb` | – |
 | order-service | Deployment + ClusterIP Service | 8083 | `orderdb` | `http://user-service:8081`, `http://product-service:8082` |
@@ -43,10 +49,19 @@ namespace) or `user-service.shopsphere.svc.cluster.local` (from anywhere in the 
 `SERVICES_USER_URL` and `SERVICES_PRODUCT_URL`, so the same jar works locally
 (`http://localhost:8081`) and in the cluster (`http://user-service:8081`).
 
-**Why ClusterIP only.** A ClusterIP Service has no public address, so none of the three
-services is reachable from the internet. You reach them with `kubectl port-forward` or from
-another pod. A real deployment would add one public entry point (an ALB Ingress or API
-gateway) in front of them; that is deliberately out of scope here.
+**Why ClusterIP for the backends.** A ClusterIP Service has no public address, so none of the three
+Java services is reachable from the internet. You reach them with `kubectl port-forward` or from
+another pod. The **frontend** is the single public entry point: its Service is `type: LoadBalancer`
+(AWS creates a load balancer and gives it a DNS name). The browser never talks to a backend
+directly; it calls relative URLs such as `/api/users`, and the nginx inside the frontend pod forwards
+only `/api/users`, `/api/products` and `/api/orders` to the matching Service. Actuator endpoints are
+not forwarded, so they stay private. A production system would put an ALB Ingress, TLS and
+authentication in front instead; that is deliberately out of scope here.
+
+**Why a proxy and not CORS.** Because the page and the API share one origin (the load balancer's
+address), no CORS configuration is needed in the Java services, and no backend address is baked into
+the JavaScript bundle. The same built image therefore works in every environment. In local
+development the Vite dev server plays the role of nginx (see `vite.config.js`).
 
 ## 2. CI/CD architecture
 
@@ -55,14 +70,16 @@ gateway) in front of them; that is deliberately out of scope here.
  ─────────                ─────────────────                         ───────
  git push ───────────────► branch user-service    ─┐
                            branch product-service  ├─ branch indexing ─► Multibranch job
-                           branch order-service   ─┘   (scan / webhook)   (one per service)
+                           branch order-service    │   (scan / webhook)   (one per service)
+                           branch frontend        ─┘
                            branch main (docs only)                              │
                                                                                 ▼
                                                                     Jenkins agent (Linux)
                                                                     ┌─────────────────────────┐
                                                                     │ 1 Checkout              │
                                                                     │ 2 Environment validation│
-                                                                    │ 3 Maven build  ─► JAR   │
+                                                                    │ 3 Maven build  ─► JAR   │   (frontend: npm ci +
+                                                                    │                         │    npm run build ─► dist/)
                                                                     │ 4 Unit tests            │
                                                                     │ 5 Docker image build    │
                                                                     │ 6 AWS authentication    │
@@ -76,7 +93,9 @@ gateway) in front of them; that is deliberately out of scope here.
 ```
 
 * **One branch = one service = one pipeline.** A push to `user-service` can only build and
-  deploy `user-service`.
+  deploy `user-service`. The `frontend` branch follows the same nine stages; only stages 3 and 4 use
+  Node.js (`npm ci`, `npm run build`, `vitest`) instead of Maven, and the Jenkins agent needs the
+  NodeJS plugin with a tool named `node-22`.
 * **Image tag** = `<8-char git commit sha>-b<jenkins build number>`, for example
   `1a2b3c4d-b7`. The commit tells you *what code*, the build number keeps tags unique if the same
   commit is built twice. ECR repositories are created with **immutable tags**, so a tag can never be
@@ -90,17 +109,20 @@ gateway) in front of them; that is deliberately out of scope here.
 
 ## 3. Naming conventions (all must match)
 
-| Thing | user | product | order |
-|-------|------|---------|-------|
-| Git branch | `user-service` | `product-service` | `order-service` |
-| Directory in branch | `user-service/` | `product-service/` | `order-service/` |
-| Maven artifactId / jar | `user-service` / `target/user-service.jar` | `product-service` | `order-service` |
-| Docker local tag | `shopsphere-user-service:<tag>` | `shopsphere-product-service:<tag>` | `shopsphere-order-service:<tag>` |
-| ECR repository | `shopsphere-user-service` | `shopsphere-product-service` | `shopsphere-order-service` |
-| Deployment / Service | `user-service` | `product-service` | `order-service` |
-| Port | 8081 | 8082 | 8083 |
-| Database | `userdb` | `productdb` | `orderdb` |
-| Multibranch Script Path | `user-service/Jenkinsfile` | `product-service/Jenkinsfile` | `order-service/Jenkinsfile` |
+| Thing | user | product | order | frontend |
+|-------|------|---------|-------|----------|
+| Git branch | `user-service` | `product-service` | `order-service` | `frontend` |
+| Directory in branch | `user-service/` | `product-service/` | `order-service/` | `frontend/` |
+| Build output | `target/user-service.jar` | `target/product-service.jar` | `target/order-service.jar` | `dist/` (static files) |
+| Docker local tag | `shopsphere-user-service:<tag>` | `shopsphere-product-service:<tag>` | `shopsphere-order-service:<tag>` | `shopsphere-frontend:<tag>` |
+| ECR repository | `shopsphere-user-service` | `shopsphere-product-service` | `shopsphere-order-service` | `shopsphere-frontend` |
+| Deployment / Service | `user-service` | `product-service` | `order-service` | `frontend` |
+| Port | 8081 | 8082 | 8083 | 8080 in the pod, 80 on the Service |
+| Database | `userdb` | `productdb` | `orderdb` | – |
+| Multibranch Script Path | `user-service/Jenkinsfile` | `product-service/Jenkinsfile` | `order-service/Jenkinsfile` | `frontend/Jenkinsfile` |
+
+The Service names `user-service`, `product-service` and `order-service` are also hard-wired into the
+frontend's `nginx.conf` (nginx proxies to `http://user-service:8081` and so on).
 
 `scripts/check_consistency.py` verifies this table automatically against the Git branches.
 
@@ -108,7 +130,13 @@ gateway) in front of them; that is deliberately out of scope here.
 
 * One MySQL pod on one EBS volume (no replication or backups). Production would use Amazon RDS.
 * `spring.jpa.hibernate.ddl-auto=update` creates tables automatically. Production uses Flyway or Liquibase.
-* No public ingress, TLS, autoscaling, service mesh, Helm, Terraform or GitOps – by design.
+* **The UI has no login and its load balancer is open to the internet** (plain HTTP, no TLS). Anyone with
+  the address can create users, products and orders. Use it for practice, restrict it with
+  `loadBalancerSourceRanges` in `frontend/k8s/service.yaml` or use `kubectl port-forward`, and delete it
+  when done. No Ingress, TLS, autoscaling, service mesh, Helm, Terraform or GitOps – by design.
+* nginx resolves the backend Service names **once, at start-up**. If a Service does not exist yet, the
+  frontend pod crash-loops with `host not found in upstream`, so deploy the frontend **last**, and
+  restart it (`kubectl rollout restart deployment/frontend`) if you ever delete and recreate a backend Service.
 * Credentials for Jenkins are an IAM user access key (easy to understand). In production prefer an
   IAM role on the agent or OIDC federation, which avoids long-lived keys.
 
