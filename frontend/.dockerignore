@@ -1,0 +1,5 @@
+# Send only the built site and the nginx config to the Docker daemon.
+# (node_modules and src never enter the image.)
+*
+!dist
+!nginx.conf

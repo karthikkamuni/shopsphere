@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --color-ink: #172229;
+  --color-muted: #55656f;
+  --color-paper: #f1f4f6;
+  --color-rule: #d9e0e5;
+
+  /* One colour per backend service. The colour is information: it tells you which service you are talking to. */
+  --color-users: #0b7a75;
+  --color-products: #e3a008;
+  --color-orders: #3b4cca;
+
+  --color-ok: #1a7f4b;
+  --color-danger: #b42318;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-ink);
+  outline-offset: 2px;
+}

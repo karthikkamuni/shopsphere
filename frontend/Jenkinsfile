@@ -1,0 +1,289 @@
+// ============================================================================
+// ShopSphere - frontend pipeline (Declarative, Jenkins Multibranch)
+//
+// Lives on the "frontend" branch at frontend/Jenkinsfile, so the
+// Multibranch job's Script Path must be:  frontend/Jenkinsfile
+//
+// Required Jenkins configuration (see README, "Jenkins setup"):
+//   Global environment variables : AWS_REGION, EKS_CLUSTER_NAME
+//   Credentials (AWS type)       : aws-shopsphere   (id used below)
+//   Global Tool Configuration    : NodeJS 'node-22' (needs the NodeJS plugin; Node 22.12 or newer)
+//   Agent tools                  : docker, aws (CLI v2), kubectl, git
+//
+// No AWS account id, region or secret is hard-coded in this file.
+// ============================================================================
+
+// Runs the given block with AWS credentials injected as environment variables.
+// The secret values exist only inside the block and are masked in the console log.
+def withAwsCredentials(Closure body) {
+    withEnv(["AWS_DEFAULT_REGION=${env.AWS_REGION}"]) {
+        withCredentials([[
+            $class            : 'AmazonWebServicesCredentialsBinding',
+            credentialsId     : env.AWS_CREDENTIALS_ID,
+            accessKeyVariable : 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable : 'AWS_SECRET_ACCESS_KEY'
+        ]]) {
+            body()
+        }
+    }
+}
+
+pipeline {
+    agent any
+
+    options {
+        skipDefaultCheckout(true)          // the explicit "Checkout" stage does it
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        disableConcurrentBuilds()
+    }
+
+    tools {
+        nodejs 'node-22'
+    }
+
+    environment {
+        SERVICE_NAME       = 'frontend'
+        ECR_REPOSITORY     = 'shopsphere-frontend'
+        K8S_NAMESPACE      = 'shopsphere'
+        AWS_CREDENTIALS_ID = 'aws-shopsphere'
+        // Per-build locations so concurrent jobs on one agent never share
+        // Docker logins or kubeconfig files.
+        DOCKER_CONFIG      = "${WORKSPACE}/.docker"
+        KUBECONFIG         = "${WORKSPACE}/.kube/config"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
+                    // Unique, traceable tag: <commit sha>-b<build number>
+                    env.IMAGE_TAG = "${env.GIT_COMMIT_SHORT}-b${env.BUILD_NUMBER}"
+                    echo "Branch=${env.BRANCH_NAME}  Commit=${env.GIT_COMMIT_SHORT}  ImageTag=${env.IMAGE_TAG}"
+                }
+                sh 'git log -1 --pretty=format:"%h %an %s"'
+            }
+        }
+
+        stage('Environment validation') {
+            steps {
+                script {
+                    // Jenkins-level settings must exist as global environment variables.
+                    ['AWS_REGION', 'EKS_CLUSTER_NAME'].each { name ->
+                        if (!env."${name}"?.trim()) {
+                            error("Jenkins global environment variable ${name} is not set (Manage Jenkins > System > Global properties).")
+                        }
+                    }
+                    if (env.BRANCH_NAME != env.SERVICE_NAME) {
+                        echo "Branch '${env.BRANCH_NAME}' is not '${env.SERVICE_NAME}': this run will build and test only; ECR push and EKS deploy are skipped."
+                    }
+                }
+                sh '''
+                    set -eu
+                    echo "Agent OS user : $(whoami)"
+                    echo "Agent identity: $(id)"
+                    for tool in git node npm docker aws kubectl; do
+                        command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: required tool '$tool' is not installed on this agent"; exit 1; }
+                    done
+                    node --version
+                    npm --version
+                    node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=12)?0:1)' || {
+                        echo "ERROR: Node 22.12 or newer is required (the NodeJS tool 'node-22' in Manage Jenkins > Tools)"
+                        exit 1
+                    }
+                    docker --version
+                    aws --version
+                    kubectl version --client
+                    docker info >/dev/null 2>&1 || {
+                        echo "ERROR: user '$(whoami)' cannot use Docker. Add that account to the docker group and restart the agent (see README troubleshooting)."
+                        exit 1
+                    }
+                    test -f "${SERVICE_NAME}/package.json"           || { echo "ERROR: ${SERVICE_NAME}/package.json not found";           exit 1; }
+                    test -f "${SERVICE_NAME}/package-lock.json"      || { echo "ERROR: ${SERVICE_NAME}/package-lock.json not found";      exit 1; }
+                    test -f "${SERVICE_NAME}/nginx.conf"             || { echo "ERROR: ${SERVICE_NAME}/nginx.conf not found";             exit 1; }
+                    test -f "${SERVICE_NAME}/Dockerfile"             || { echo "ERROR: ${SERVICE_NAME}/Dockerfile not found";             exit 1; }
+                    test -f "${SERVICE_NAME}/k8s/deployment.yaml"    || { echo "ERROR: ${SERVICE_NAME}/k8s/deployment.yaml not found";    exit 1; }
+                    test -f "${SERVICE_NAME}/k8s/service.yaml"       || { echo "ERROR: ${SERVICE_NAME}/k8s/service.yaml not found";       exit 1; }
+                    echo "Environment validation passed"
+                '''
+            }
+        }
+
+        stage('Frontend build') {
+            steps {
+                dir(env.SERVICE_NAME) {
+                    // npm ci installs exactly what package-lock.json says (reproducible), then Vite builds dist/
+                    sh '''
+                        set -eu
+                        npm ci --no-audit --no-fund
+                        npm run build
+                        test -f dist/index.html || { echo "ERROR: dist/index.html is missing - the build did not produce the site"; exit 1; }
+                    '''
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: "${env.SERVICE_NAME}/dist/**", fingerprint: true
+                }
+            }
+        }
+
+        stage('Unit tests') {
+            steps {
+                dir(env.SERVICE_NAME) {
+                    sh 'npm test -- --reporter=default --reporter=junit --outputFile.junit=test-results/junit.xml'
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: "${env.SERVICE_NAME}/test-results/*.xml"
+                }
+            }
+        }
+
+        stage('Docker image build') {
+            steps {
+                // The Docker build context is the service directory, which now contains dist/ and nginx.conf
+                dir(env.SERVICE_NAME) {
+                    sh '''
+                        set -eu
+                        test -f dist/index.html || { echo "ERROR: dist/index.html is missing - the frontend build stage must succeed first"; exit 1; }
+                        docker build \
+                            --label "org.opencontainers.image.revision=${GIT_COMMIT_SHORT}" \
+                            --label "org.opencontainers.image.source=${GIT_URL:-unknown}" \
+                            --label "ci.build-number=${BUILD_NUMBER}" \
+                            -t "${ECR_REPOSITORY}:${IMAGE_TAG}" .
+                        docker image ls "${ECR_REPOSITORY}:${IMAGE_TAG}"
+                    '''
+                }
+            }
+        }
+
+        stage('AWS authentication') {
+            when { expression { env.BRANCH_NAME == env.SERVICE_NAME } }
+            steps {
+                script {
+                    withAwsCredentials {
+                        env.AWS_ACCOUNT_ID = sh(script: 'aws sts get-caller-identity --query Account --output text', returnStdout: true).trim()
+                        env.ECR_REGISTRY   = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+                        env.IMAGE_URI      = "${env.ECR_REGISTRY}/${env.ECR_REPOSITORY}:${env.IMAGE_TAG}"
+                        sh '''
+                            set -eu
+                            echo "AWS identity: $(aws sts get-caller-identity --query Arn --output text)"
+                            aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null || {
+                                echo "ERROR: ECR repository '${ECR_REPOSITORY}' does not exist in ${AWS_REGION}. Create it first (README: AWS ECR configuration)."
+                                exit 1
+                            }
+                            # Docker -> ECR login. The token is piped, never printed or stored in the Jenkinsfile.
+                            aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+                            # kubectl -> EKS: writes a kubeconfig into this workspace only.
+                            mkdir -p "$(dirname "${KUBECONFIG}")"
+                            aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+                            kubectl auth can-i create deployments --namespace "${K8S_NAMESPACE}" || {
+                                echo "ERROR: this AWS identity has no permission to deploy to namespace '${K8S_NAMESPACE}' (README: EKS access for Jenkins)."
+                                exit 1
+                            }
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Push image to ECR') {
+            when { expression { env.BRANCH_NAME == env.SERVICE_NAME } }
+            steps {
+                script {
+                    withAwsCredentials {
+                        sh '''
+                            set -eu
+                            docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${IMAGE_URI}"
+                            docker push "${IMAGE_URI}"
+                            echo "Image digest in ECR:"
+                            aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids imageTag="${IMAGE_TAG}" \
+                                --region "${AWS_REGION}" --query 'imageDetails[0].imageDigest' --output text
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            when { expression { env.BRANCH_NAME == env.SERVICE_NAME } }
+            steps {
+                script {
+                    withAwsCredentials {
+                        sh '''
+                            set -eu
+                            RENDERED_DIR="${WORKSPACE}/.rendered"
+                            mkdir -p "${RENDERED_DIR}"
+                            sed "s|__IMAGE_URI__|${IMAGE_URI}|g" "${SERVICE_NAME}/k8s/deployment.yaml" > "${RENDERED_DIR}/deployment.yaml"
+                            grep -q "${IMAGE_TAG}" "${RENDERED_DIR}/deployment.yaml" || { echo "ERROR: image placeholder was not replaced"; exit 1; }
+                            echo "Deploying ${IMAGE_URI} to namespace ${K8S_NAMESPACE}"
+                            kubectl apply --namespace "${K8S_NAMESPACE}" -f "${SERVICE_NAME}/k8s/service.yaml"
+                            kubectl apply --namespace "${K8S_NAMESPACE}" -f "${RENDERED_DIR}/deployment.yaml"
+                            kubectl annotate deployment/"${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}" \
+                                kubernetes.io/change-cause="jenkins build ${BUILD_NUMBER}: ${IMAGE_TAG}" --overwrite
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Verify deployment') {
+            when { expression { env.BRANCH_NAME == env.SERVICE_NAME } }
+            steps {
+                script {
+                    withAwsCredentials {
+                        try {
+                            sh '''
+                                set -eu
+                                kubectl rollout status deployment/"${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}" --timeout=300s
+                                DEPLOYED_IMAGE="$(kubectl get deployment/"${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+                                echo "Deployed image: ${DEPLOYED_IMAGE}"
+                                [ "${DEPLOYED_IMAGE}" = "${IMAGE_URI}" ] || { echo "ERROR: deployed image does not match ${IMAGE_URI}"; exit 1; }
+                                kubectl get pods --namespace "${K8S_NAMESPACE}" -l app="${SERVICE_NAME}" -o wide
+                                kubectl get service "${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}"
+                                # The public address of the load balancer can take a few minutes to appear.
+                                ADDRESS="$(kubectl get service "${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')"
+                                if [ -n "${ADDRESS}" ]; then echo "Open the app at: http://${ADDRESS}"; else echo "Load balancer address not ready yet. Run: kubectl -n ${K8S_NAMESPACE} get service ${SERVICE_NAME}"; fi
+                            '''
+                        } catch (err) {
+                            echo "Deployment verification failed: ${err}"
+                            sh '''
+                                kubectl get pods --namespace "${K8S_NAMESPACE}" -l app="${SERVICE_NAME}" -o wide || true
+                                kubectl describe deployment/"${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}" | tail -n 40 || true
+                                kubectl logs deployment/"${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}" --tail=50 || true
+                                echo "Rolling back to the previous revision (if one exists)..."
+                                kubectl rollout undo deployment/"${SERVICE_NAME}" --namespace "${K8S_NAMESPACE}" || true
+                            '''
+                            error("Deployment of ${env.IMAGE_URI} failed verification and a rollback was attempted.")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Remove the Docker login, kubeconfig and rendered manifest so no credentials stay on the agent.
+            sh '''
+                if [ -n "${IMAGE_TAG:-}" ]; then
+                    docker image rm "${ECR_REPOSITORY}:${IMAGE_TAG}" >/dev/null 2>&1 || true
+                    if [ -n "${IMAGE_URI:-}" ]; then docker image rm "${IMAGE_URI}" >/dev/null 2>&1 || true; fi
+                fi
+                rm -rf "${DOCKER_CONFIG}" "${WORKSPACE}/.kube" "${WORKSPACE}/.rendered"
+            '''
+        }
+        success {
+            echo "SUCCESS: ${env.SERVICE_NAME} build ${env.BUILD_NUMBER} (${env.IMAGE_TAG ?: 'no image'}) finished."
+        }
+        failure {
+            echo "FAILED: ${env.SERVICE_NAME} build ${env.BUILD_NUMBER}. Check the first red stage above and the README troubleshooting section."
+        }
+    }
+}

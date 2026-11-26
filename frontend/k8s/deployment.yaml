@@ -1,0 +1,89 @@
+# frontend Deployment.
+#
+# The image field holds the placeholder __IMAGE_URI__. The Jenkins pipeline
+# replaces it with the real ECR image (<registry>/shopsphere-frontend:<sha>-b<build>)
+# before running "kubectl apply". To deploy by hand, render it the same way:
+#   sed "s|__IMAGE_URI__|<your-image-uri>|g" k8s/deployment.yaml | kubectl apply -f -
+#
+# Deploy this AFTER user-service, product-service and order-service exist: nginx looks up
+# their Service names when it starts and stops if a name cannot be found.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: shopsphere
+  labels:
+    app: frontend
+    app.kubernetes.io/part-of: shopsphere
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        app.kubernetes.io/part-of: shopsphere
+    spec:
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      # Image pull configuration: no imagePullSecrets are needed when the EKS
+      # worker nodes' IAM role has ECR read access (eksctl/managed node groups
+      # attach it by default) and the ECR repository is in the same AWS account.
+      containers:
+        - name: frontend
+          image: __IMAGE_URI__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # No environment variables: the browser calls relative /api/... URLs and
+          # nginx.conf forwards them to the Service names user-service, product-service, order-service.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # nginx (unprivileged image) keeps its pid file and temporary files in /tmp.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
