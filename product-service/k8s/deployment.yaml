@@ -62,6 +62,16 @@ spec:
                 secretKeyRef:
                   name: mysql-credentials
                   key: MYSQL_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: shopsphere-app-secrets
+                  key: JWT_SECRET
+            - name: SERVICE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: shopsphere-app-secrets
+                  key: SERVICE_API_KEY
           resources:
             requests:
               cpu: 250m

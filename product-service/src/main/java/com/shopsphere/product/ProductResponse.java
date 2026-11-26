@@ -3,10 +3,10 @@ package com.shopsphere.product;
 import java.math.BigDecimal;
 import java.time.Instant;
 
-public record ProductResponse(Long id, String name, String description, BigDecimal price, Instant createdAt) {
+public record ProductResponse(Long id, String name, String description, BigDecimal price, String category, String imageUrl, int stock, boolean available, boolean active, Instant createdAt) {
 
     static ProductResponse from(Product product) {
-        return new ProductResponse(product.getId(), product.getName(), product.getDescription(),
-                product.getPrice(), product.getCreatedAt());
+        return new ProductResponse(product.getId(), product.getName(), product.getDescription(), product.getPrice(),
+                product.getCategory(), product.getImageUrl(), product.getStock(), product.isAvailable(), product.isActive(), product.getCreatedAt());
     }
 }
