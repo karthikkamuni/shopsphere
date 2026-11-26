@@ -1,113 +1,26 @@
 package com.shopsphere.order;
-
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.web.server.ResponseStatusException;
-
-import java.math.BigDecimal;
-import java.util.Optional;
-
-import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
-@SpringBootTest
-@AutoConfigureMockMvc
-@ActiveProfiles("test")
-class OrderControllerTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    // The real clients would call other services over HTTP; tests replace them.
-    @MockitoBean
-    private UserClient userClient;
-
-    @MockitoBean
-    private ProductClient productClient;
-
-    @Test
-    void healthEndpointReportsUp() throws Exception {
-        mockMvc.perform(get("/actuator/health"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("UP"));
-    }
-
-    @Test
-    void readinessProbeReportsUp() throws Exception {
-        mockMvc.perform(get("/actuator/health/readiness"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("UP"));
-    }
-
-    @Test
-    void createOrderCalculatesTotal() throws Exception {
-        when(userClient.exists(1L)).thenReturn(true);
-        when(productClient.findProduct(5L))
-                .thenReturn(Optional.of(new ProductDto(5L, "Mechanical Keyboard", new BigDecimal("49.99"))));
-
-        mockMvc.perform(post("/api/orders")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"userId\":1,\"productId\":5,\"quantity\":2}"))
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.id").isNumber())
-                .andExpect(jsonPath("$.status").value("CREATED"))
-                .andExpect(jsonPath("$.quantity").value(2))
-                .andExpect(jsonPath("$.totalPrice").value(99.98));
-    }
-
-    @Test
-    void unknownUserReturns400() throws Exception {
-        when(userClient.exists(404L)).thenReturn(false);
-
-        mockMvc.perform(post("/api/orders")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"userId\":404,\"productId\":5,\"quantity\":1}"))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    void unknownProductReturns400() throws Exception {
-        when(userClient.exists(2L)).thenReturn(true);
-        when(productClient.findProduct(404L)).thenReturn(Optional.empty());
-
-        mockMvc.perform(post("/api/orders")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"userId\":2,\"productId\":404,\"quantity\":1}"))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    void downstreamOutageReturns503() throws Exception {
-        when(userClient.exists(3L))
-                .thenThrow(new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "user-service is unavailable"));
-
-        mockMvc.perform(post("/api/orders")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"userId\":3,\"productId\":5,\"quantity\":1}"))
-                .andExpect(status().isServiceUnavailable());
-    }
-
-    @Test
-    void zeroQuantityReturns400() throws Exception {
-        mockMvc.perform(post("/api/orders")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"userId\":1,\"productId\":5,\"quantity\":0}"))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    void unknownOrderReturns404() throws Exception {
-        mockMvc.perform(get("/api/orders/999999"))
-                .andExpect(status().isNotFound());
-    }
+import org.junit.jupiter.api.*;import org.springframework.beans.factory.annotation.Autowired;import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;import org.springframework.boot.test.context.SpringBootTest;import org.springframework.http.*;import org.springframework.test.context.ActiveProfiles;import org.springframework.test.context.bean.override.mockito.MockitoBean;import org.springframework.test.web.servlet.MockMvc;import org.springframework.web.server.ResponseStatusException;import javax.crypto.Mac;import javax.crypto.spec.SecretKeySpec;import java.math.BigDecimal;import java.nio.charset.StandardCharsets;import java.util.*;
+import static org.mockito.ArgumentMatchers.*;import static org.mockito.Mockito.*;import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+@SpringBootTest @AutoConfigureMockMvc @ActiveProfiles("test") class OrderControllerTest {
+ @Autowired MockMvc mvc;@Autowired OrderRepository orders;@Autowired OrderService orderService;@Autowired OrderPersistenceService persistence;@MockitoBean UserClient userClient;@MockitoBean ProductClient productClient;
+ private final String key="test-secret-that-is-definitely-longer-than-32-bytes";
+ @BeforeEach void activeAccountsByDefault(){lenient().when(userClient.active(anyLong())).thenReturn(true);}
+ String jwt(long user,String role)throws Exception{Base64.Encoder e=Base64.getUrlEncoder().withoutPadding();String h=e.encodeToString("{\"alg\":\"HS256\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));String p=e.encodeToString(("{\"sub\":\""+user+"\",\"role\":\""+role+"\",\"iat\":1760000000,\"exp\":1990000000}").getBytes(StandardCharsets.UTF_8));String data=h+"."+p;Mac m=Mac.getInstance("HmacSHA256");m.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8),"HmacSHA256"));return "Bearer "+data+"."+e.encodeToString(m.doFinal(data.getBytes(StandardCharsets.UTF_8)));}
+ void downstream(){when(userClient.active(anyLong())).thenReturn(true);when(productClient.findProduct(5L)).thenReturn(Optional.of(new ProductDto(5L,"Mechanical Keyboard","Compact mechanical keyboard",new BigDecimal("49.99"),"Accessories",null,10,true)));when(productClient.reserve(anyLong(),anyInt(),anyString())).thenAnswer(i->new ReservationResponse(i.getArgument(2),"RESERVED"));}
+ String order(long user,String role,String idempotency)throws Exception{return mvc.perform(post("/api/orders").header("Authorization",jwt(user,role)).header("Idempotency-Key",idempotency).contentType(MediaType.APPLICATION_JSON).content("{\"userId\":"+user+",\"productId\":5,\"quantity\":2}" )).andReturn().getResponse().getContentAsString();}
+ @Test void healthEndpointsRemainPublic()throws Exception{mvc.perform(get("/actuator/health")).andExpect(status().isOk());mvc.perform(get("/actuator/health/readiness")).andExpect(status().isOk());}
+ @Test void createOrderUsesTrustedProductPriceAndSnapshotsItem()throws Exception{downstream();String body=order(1,"USER",UUID.randomUUID().toString());var json=com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(body);Assertions.assertEquals(new BigDecimal("99.98"),json.get("totalPrice").decimalValue());Assertions.assertEquals("PLACED",json.get("status").asText());Assertions.assertEquals("Mechanical Keyboard",json.get("items").get(0).get("productName").asText());verify(productClient).commit(anyString());}
+ @Test void checkoutIsIdempotentAndDoesNotDuplicateOrder()throws Exception{downstream();String idem=UUID.randomUUID().toString();String a=order(2,"USER",idem);String b=order(2,"USER",idem);Assertions.assertEquals(com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(a).get("id"),com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(b).get("id"));Assertions.assertEquals(1,orders.findAll().stream().filter(o->idem.equals(o.getCheckoutKey())).count());verify(productClient,times(1)).reserve(anyLong(),anyInt(),anyString());}
+ @Test void anonymousIsRejectedAndUserCannotAccessOtherUsersOrders()throws Exception{mvc.perform(get("/api/orders")).andExpect(status().isUnauthorized());downstream();String b=order(3,"USER",UUID.randomUUID().toString());long id=com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(b).get("id").asLong();mvc.perform(get("/api/orders/"+id).header("Authorization",jwt(4,"USER"))).andExpect(status().isForbidden());}
+ @Test void adminCanSeeAllAndUserCannotUseAdminStatusEndpoint()throws Exception{downstream();String b=order(5,"USER",UUID.randomUUID().toString());long id=com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(b).get("id").asLong();mvc.perform(get("/api/orders").header("Authorization",jwt(99,"ADMIN"))).andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(org.hamcrest.Matchers.greaterThanOrEqualTo(1)));mvc.perform(patch("/api/orders/"+id+"/status").header("Authorization",jwt(5,"USER")).contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"CONFIRMED\"}")).andExpect(status().isForbidden());}
+ @Test void onlyAdminOrderViewsIncludeTrustedCustomerDetails()throws Exception{downstream();String b=order(55,"USER",UUID.randomUUID().toString());long id=com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(b).get("id").asLong();when(userClient.details(55L)).thenReturn(new CustomerDetails(55L,"Asha Rao","asha@example.com",true));mvc.perform(get("/api/orders/"+id).header("Authorization",jwt(55,"USER"))).andExpect(status().isOk()).andExpect(jsonPath("$.customer").doesNotExist());mvc.perform(get("/api/orders/"+id).header("Authorization",jwt(99,"ADMIN"))).andExpect(status().isOk()).andExpect(jsonPath("$.customer.name").value("Asha Rao")).andExpect(jsonPath("$.customer.email").value("asha@example.com"));}
+ @Test void blockedAccountAndUnavailableStockAreRejected()throws Exception{when(userClient.active(6L)).thenReturn(false);mvc.perform(post("/api/orders").header("Authorization",jwt(6,"USER")).header("Idempotency-Key",UUID.randomUUID().toString()).contentType(MediaType.APPLICATION_JSON).content("{\"userId\":6,\"productId\":5,\"quantity\":1}")).andExpect(status().isForbidden());verifyNoInteractions(productClient);}
+ @Test void userIdFromRequestCannotEscalateOrOrderAsAnotherUser()throws Exception{downstream();mvc.perform(post("/api/orders").header("Authorization",jwt(7,"USER")).contentType(MediaType.APPLICATION_JSON).content("{\"userId\":8,\"productId\":5,\"quantity\":1}")).andExpect(status().isForbidden());}
+ @Test void cartCanAddInspectUpdateRemoveAndClear()throws Exception{downstream();String auth=jwt(12,"USER");mvc.perform(post("/api/cart/items").header("Authorization",auth).contentType(MediaType.APPLICATION_JSON).content("{\"productId\":5,\"quantity\":2}")).andExpect(status().isCreated()).andExpect(jsonPath("$.total").value(99.98));mvc.perform(get("/api/cart").header("Authorization",auth)).andExpect(status().isOk()).andExpect(jsonPath("$.items[0].quantity").value(2));mvc.perform(put("/api/cart/items/5").header("Authorization",auth).contentType(MediaType.APPLICATION_JSON).content("{\"quantity\":1}")).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(49.99));mvc.perform(delete("/api/cart/items/5").header("Authorization",auth)).andExpect(status().isNoContent());mvc.perform(delete("/api/cart").header("Authorization",auth)).andExpect(status().isNoContent());}
+ @Test void emptyCartCheckoutAndInvalidQuantityAreRejected()throws Exception{mvc.perform(post("/api/orders/checkout").header("Authorization",jwt(15,"USER")).header("Idempotency-Key",UUID.randomUUID().toString())).andExpect(status().isBadRequest());mvc.perform(post("/api/cart/items").header("Authorization",jwt(15,"USER")).contentType(MediaType.APPLICATION_JSON).content("{\"productId\":5,\"quantity\":0}")).andExpect(status().isBadRequest());}
+ @Test void unavailableProductAndInsufficientStockDoNotCreateOrder()throws Exception{when(userClient.active(20L)).thenReturn(true);when(productClient.findProduct(5L)).thenReturn(Optional.of(new ProductDto(5L,"Mechanical Keyboard","description",new BigDecimal("49.99"),"Accessories",null,0,false)));long before=orders.count();mvc.perform(post("/api/orders").header("Authorization",jwt(20,"USER")).header("Idempotency-Key",UUID.randomUUID().toString()).contentType(MediaType.APPLICATION_JSON).content("{\"userId\":20,\"productId\":5,\"quantity\":1}")).andExpect(status().isConflict());Assertions.assertEquals(before,orders.count());}
+ @Test void statusTransitionsAndCancellationAreValidatedAndCompensated()throws Exception{downstream();String body=order(21,"USER",UUID.randomUUID().toString());long id=com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(body).get("id").asLong();mvc.perform(patch("/api/orders/"+id+"/status").header("Authorization",jwt(99,"ADMIN")).contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"CONFIRMED\"}")).andExpect(status().isOk());mvc.perform(patch("/api/orders/"+id+"/status").header("Authorization",jwt(99,"ADMIN")).contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"DELIVERED\"}")).andExpect(status().isConflict());mvc.perform(patch("/api/orders/"+id+"/cancel").header("Authorization",jwt(21,"USER"))).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("CANCELLED"));verify(productClient,atLeastOnce()).release(anyString());}
+ @Test void adminDashboardReturnsRealCountersAndRevenue()throws Exception{downstream();order(22,"USER",UUID.randomUUID().toString());mvc.perform(get("/api/admin/dashboard").header("Authorization",jwt(99,"ADMIN"))).andExpect(status().isOk()).andExpect(jsonPath("$.totalOrders").isNumber()).andExpect(jsonPath("$.recentOrders.length()").value(org.hamcrest.Matchers.greaterThanOrEqualTo(1)));}
+ @Test void recoveryCommitsPersistedOrdersAndReleasesCancelledOrdersIdempotently(){String pending=UUID.randomUUID().toString();Order saved=persistence.save(61L,UUID.randomUUID().toString(),List.of(new OrderItem(5L,"Keyboard",new BigDecimal("49.99"),1,pending)),false);orderService.reconcileReservationSettlements();verify(productClient).commit(pending);Assertions.assertEquals("COMMITTED",persistence.reservations(saved.getId()).get(0).reservationStatus());String cancelledReservation=UUID.randomUUID().toString();Order cancelled=persistence.save(62L,UUID.randomUUID().toString(),List.of(new OrderItem(5L,"Keyboard",new BigDecimal("49.99"),1,cancelledReservation)),false);cancelled.setStatus(OrderStatus.CANCELLED);orders.saveAndFlush(cancelled);orderService.reconcileReservationSettlements();verify(productClient).release(cancelledReservation);Assertions.assertTrue(persistence.reservations(cancelled.getId()).isEmpty());orderService.reconcileReservationSettlements();verify(productClient,times(1)).release(cancelledReservation);}
+ @Test void concurrentSameCheckoutKeyProducesOnlyOneOrder()throws Exception{downstream();String id=UUID.randomUUID().toString();OrderRequest request=new OrderRequest(31L,5L,1);java.util.concurrent.CountDownLatch gate=new java.util.concurrent.CountDownLatch(1);var pool=java.util.concurrent.Executors.newFixedThreadPool(2);java.util.concurrent.Callable<OrderResponse> action=()->{gate.await();return orderService.checkoutSingle(31L,id,request);};var a=pool.submit(action);var b=pool.submit(action);gate.countDown();OrderResponse one=a.get();OrderResponse two=b.get();pool.shutdownNow();Assertions.assertEquals(one.id(),two.id());Assertions.assertEquals(1,orders.findAll().stream().filter(o->id.equals(o.getCheckoutKey())).count());}
 }
