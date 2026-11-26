@@ -199,13 +199,13 @@ describe('ShopSphere administration', () => {
   });
 
   it('updates an order status through the admin order-management contract', async () => {
-    const order={id:31,userId:4,productId:7,quantity:1,unitPrice:149.5,totalPrice:149.5,status:'PLACED',createdAt:'2026-11-26T10:00:00Z',customer:{id:4,name:'Mira Sen',email:'mira@example.com',active:true},items:[{productId:7,productName:product.name,unitPrice:149.5,quantity:1,subtotal:149.5}]};
+    const order={id:31,userId:4,productId:7,quantity:1,unitPrice:149.5,totalPrice:149.5,status:'PLACED',createdAt:'2026-11-26T10:00:00Z',customer:{id:4,name:'Mira Sen',email:'mira@example.com',active:true},items:[{productId:7,productName:product.name,unitPrice:149.5,quantity:1,subtotal:149.5}]};let currentOrder=order;
     localStorage.setItem('shopsphere.jwt','admin-token');const api=fakeFetch();api.fetchMock.mockImplementation(async(url,options={})=>{
       const body=options.body?JSON.parse(options.body):undefined;api.calls.push({url,method:options.method||'GET',body});
       if(url==='/api/users/me')return json(admin);
       if(url.startsWith('/api/orders?'))return json({content:[order],number:0,totalPages:1});
-      if(url==='/api/orders/31'&&options.method==='GET')return json(order);
-      if(url==='/api/orders/31/status')return json({...order,status:body.status});
+      if(url==='/api/orders/31'&&options.method==='GET')return json(currentOrder);
+      if(url==='/api/orders/31/status'){currentOrder={...currentOrder,status:body.status};return json(currentOrder);}
       return json([]);
     });vi.stubGlobal('fetch',api.fetchMock);startAt('/admin/orders');const u=userEvent.setup();render(<App/>);
     await u.click(await screen.findByRole('link',{name:/details/i}));
