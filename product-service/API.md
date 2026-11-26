@@ -38,7 +38,9 @@ Internal endpoints require `X-Service-Token: <SERVICE_API_KEY>`. Use a unique UU
 * `POST /internal/products/reservations/{reservationId}/commit` marks a successful order
   committed. Repeated commits are safe.
 * `POST /internal/products/reservations/{reservationId}/release` restores stock once for a
-  failed order. Repeated releases are safe.
+  failed order or a cancelled committed order. Repeated releases are safe; the reservation
+  transitions to `RELEASED` before commit or `RESTOCKED` after commit. A released/restocked key
+  cannot be reused to reserve stock again.
 
 Order placement spans separate databases and therefore is a reservation/compensation flow,
 not a distributed ACID transaction: reserve stock, persist the order, commit the reservation;

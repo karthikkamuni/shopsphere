@@ -26,13 +26,14 @@ import java.util.*;
  @Transactional public ProductResponse availability(Long id,boolean available){Product p=active(id);p.setAvailable(available);return ProductResponse.from(p);}
  @Transactional public ReservationResponse reserve(Long id,int qty,String key){
   try { java.util.UUID.fromString(key); } catch (Exception e) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Idempotency-Key must be a UUID"); }
-  Optional<StockReservation> previous=reservations.findById(key); if(previous.isPresent()){StockReservation r=previous.get();if(!r.getProductId().equals(id)||r.getQuantity()!=qty)throw new ResponseStatusException(HttpStatus.CONFLICT,"Idempotency key reused with different reservation");if("RELEASED".equals(r.getStatus()))throw new ResponseStatusException(HttpStatus.CONFLICT,"Reservation was already released");return new ReservationResponse(key,r.getStatus());}
+  Optional<StockReservation> previous=reservations.findById(key); if(previous.isPresent()){StockReservation r=previous.get();if(!r.getProductId().equals(id)||r.getQuantity()!=qty)throw new ResponseStatusException(HttpStatus.CONFLICT,"Idempotency key reused with different reservation");if("RELEASED".equals(r.getStatus())||"RESTOCKED".equals(r.getStatus()))throw new ResponseStatusException(HttpStatus.CONFLICT,"Reservation was already released");return new ReservationResponse(key,r.getStatus());}
   if(products.reserveStock(id,qty)!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"Product unavailable or insufficient stock");
   reservations.save(new StockReservation(key,id,qty));return new ReservationResponse(key,"RESERVED");
  }
  @Transactional public ReservationResponse settle(String key,boolean commit){StockReservation r=reservations.findById(key).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Reservation not found"));
-  if("RESERVED".equals(r.getStatus())){if(!commit)products.returnStock(r.getProductId(),r.getQuantity());r.setStatus(commit?"COMMITTED":"RELEASED");}
-  return new ReservationResponse(key,r.getStatus());
+  if(commit){reservations.markCommitted(key);}
+  else {int changed=reservations.markReleased(key);if(changed==0)changed=reservations.markRestocked(key);if(changed==1)products.returnStock(r.getProductId(),r.getQuantity());}
+  return new ReservationResponse(key,reservations.findById(key).orElseThrow().getStatus());
  }
  private Product active(Long id){return products.findById(id).filter(Product::isActive).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Product "+id+" not found"));}
 }

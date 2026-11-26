@@ -64,4 +64,5 @@ class ProductControllerTest {
   org.assertj.core.api.Assertions.assertThat(accepted).isEqualTo(1);
   org.assertj.core.api.Assertions.assertThat(repo.findById(p.getId()).orElseThrow().getStock()).isEqualTo(1);
  }
+ @Test void releaseAfterCommitRestocksExactlyOnce(){Product p=repo.save(new Product(new ProductRequest("Cancel Stock","test",new java.math.BigDecimal("9.99"),"Test",null,6,true)));String key=UUID.randomUUID().toString();service.reserve(p.getId(),2,key);service.settle(key,true);org.assertj.core.api.Assertions.assertThat(repo.findById(p.getId()).orElseThrow().getStock()).isEqualTo(4);org.assertj.core.api.Assertions.assertThat(service.settle(key,false).status()).isEqualTo("RESTOCKED");service.settle(key,false);org.assertj.core.api.Assertions.assertThat(repo.findById(p.getId()).orElseThrow().getStock()).isEqualTo(6);}
 }
