@@ -11,8 +11,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/api/auth': 'http://localhost:8081',
       '/api/users': 'http://localhost:8081',
       '/api/products': 'http://localhost:8082',
+      '/api/cart': 'http://localhost:8083',
+      '/api/admin': 'http://localhost:8083',
       '/api/orders': 'http://localhost:8083',
     },
   },
