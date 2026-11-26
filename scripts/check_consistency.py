@@ -220,7 +220,9 @@ def check_frontend():
     pkg = json.loads(show(name, "frontend/package.json"))
     check(f"{tag} package.json has build and test scripts",
           pkg["scripts"].get("build") == "vite build" and pkg["scripts"].get("test") == "vitest run")
-    check(f"{tag} package.json requires Node >=22.12", pkg.get("engines", {}).get("node") == ">=22.12")
+    node_engine = "^22.22.2 || ^24.15.0 || >=26.0.0"
+    check(f"{tag} package.json Node engine matches locked jsdom support", pkg.get("engines", {}).get("node") == node_engine)
+    check(f"{tag} Jenkins requires Node 22.22.2 on its node-22 tool", "a===22&&(b>22||(b===22&&c>=2))" in jf)
     lock_root = json.loads(show(name, "frontend/package-lock.json"))["packages"][""]
     check(f"{tag} package-lock.json declares the same dependencies as package.json (npm ci will accept it)",
           {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}

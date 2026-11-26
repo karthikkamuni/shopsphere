@@ -14,8 +14,9 @@ This report reflects the final local integration changes on the service and fron
 | order-service | `mvn -B -ntp clean package` | BUILD SUCCESS; tests passed and `target/order-service.jar` was produced. |
 | frontend | `npm.cmd test` | 12 tests passed, 0 failed, including inactive product reactivation and admin customer detail display. |
 | frontend | `npm.cmd run build` | Vite production build succeeded. |
-| Cross-branch contracts | `python scripts/check_consistency.py` | 245 checks passed, 0 failed across all five branches. The checker now validates routes, service URLs, secret references, API documentation, Compose services, and deployment structure. |
+| Cross-branch contracts | `python scripts/check_consistency.py` | 246 checks passed, 0 failed across all five branches. The checker now validates routes, service URLs, secret references, API documentation, Compose services, and deployment structure. |
 | Whitespace | `git diff --check` | Passed for the final changes at the time of commit. |
+| Kubernetes secret helper | `bash -n scripts/create-k8s-secrets.sh` | Shell syntax passed. The script was not run against a cluster and no secret values were created. |
 
 The Maven tests use Spring Boot/MockMvc with H2. User and product tests exercise their own controllers and persistence; order-service's calls to user-service and product-service are mocked. These are service-level/component tests, not live multi-service end-to-end tests. The admin order test verifies that customer details appear only in ADMIN responses. Product stock and order cancellation are tested separately; a running three-service workflow was not available.
 

@@ -9,8 +9,8 @@
  Namespace: shopsphere
  ┌──────────────────────────────────────────────────────────────────────────┐
  │  Service: frontend :80 (LoadBalancer) ──► Deployment frontend (2 pods)   │
- │    nginx :8080 serves the React app and forwards only /api/users,        │
- │    /api/products and /api/orders to the three Services below             │
+ │    nginx :8080 proxies /api/auth, /api/users, /api/products,        │
+ │    /api/cart, /api/orders, /api/admin to their owning Services below             │
  │         │ (cluster DNS)                                                  │
  │         ▼                                                                │
  │   Service: order-service :8083  ──►  Deployment order-service  (2 pods)  │
