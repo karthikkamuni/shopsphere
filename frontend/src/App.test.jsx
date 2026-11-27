@@ -48,6 +48,11 @@ describe('ShopSphere customer experience', () => {
     expect(await screen.findByRole('heading', { name: /shop thoughtfully/i })).toBeInTheDocument();
     expect(screen.getByText('Studio headphones')).toBeInTheDocument();
     expect(api.calls.some((call) => call.url.includes('/api/products/page?') && call.url.includes('category=Electronics'))).toBe(true);
+    const u = userEvent.setup();
+    await u.click(screen.getByRole('link', { name: 'Everyday wear' }));
+    await waitFor(() => expect(api.calls.some((call) => call.url.includes('/api/products/page?') && call.url.includes('category=Fashion'))).toBe(true));
+    await u.click(screen.getByRole('link', { name: 'Shop all' }));
+    await waitFor(() => expect(api.calls.some((call) => call.url.includes('/api/products/page?') && !call.url.includes('category='))).toBe(true));
   });
 
   it('registers and logs in through the user-service contract', async () => {
