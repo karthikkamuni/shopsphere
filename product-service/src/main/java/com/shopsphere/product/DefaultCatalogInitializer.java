@@ -28,7 +28,7 @@ import java.util.List;
    p("casual-backpack","Casual Backpack","Water-resistant 22L daypack with padded laptop sleeve.",54.50,"Fashion","https://images.unsplash.com/photo-1553062407-98eeb64c6a62",32),
    p("cotton-tshirt","Cotton T-Shirt","Soft 100% cotton crew-neck T-shirt in a versatile everyday fit.",24.00,"Fashion","https://images.unsplash.com/photo-1521572163474-6864f9cf17ab",50),
    p("coffee-maker","Coffee Maker","Programmable 10-cup drip coffee maker with reusable filter.",79.99,"Home & Kitchen","https://images.unsplash.com/photo-1495474472287-4d71bcdd2085",14),
-   p("air-fryer","Air Fryer","5.5-quart digital air fryer with preset cooking programs.",129.99,"Home & Kitchen","https://images.unsplash.com/photo-1648133444941-163a9b4f7b9e",11));
+   p("air-fryer","Air Fryer","5.5-quart digital air fryer with preset cooking programs.",129.99,"Home & Kitchen","https://upload.wikimedia.org/wikipedia/commons/d/d3/Air_Fryer_2020.jpg",11));
   for(Product p:defaults)if(products.findBySeedKey(p.getSeedKey()).isEmpty())products.save(p);
   markers.save(new CatalogSeedMarker("default-catalog-v1"));
  }
