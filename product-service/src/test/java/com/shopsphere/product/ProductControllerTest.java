@@ -75,4 +75,8 @@ class ProductControllerTest {
   mvc.perform(post("/api/products").contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isUnauthorized()).andExpect(jsonPath("$.error").value("Authentication required"));
   mvc.perform(post("/api/products").header("Authorization","Bearer "+jwt("USER")).contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isForbidden()).andExpect(jsonPath("$.error").value("Insufficient permissions"));
  }
+ @Test void pageFiltersByCategoryAndQuery()throws Exception{
+  mvc.perform(get("/api/products/page").param("category","Fashion")).andExpect(status().isOk()).andExpect(jsonPath("$.content[*].category",org.hamcrest.Matchers.everyItem(org.hamcrest.Matchers.equalToIgnoringCase("Fashion"))));
+  mvc.perform(get("/api/products/page").param("category","Electronics").param("q","iPhone")).andExpect(status().isOk()).andExpect(jsonPath("$.content.length()").value(1)).andExpect(jsonPath("$.content[0].name").value("Apple iPhone 15"));
+ }
 }

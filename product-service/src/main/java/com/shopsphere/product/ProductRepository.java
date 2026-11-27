@@ -15,6 +15,8 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
     List<Product> findByActiveTrueAndCategoryIgnoreCase(String category);
     List<Product> findByActiveTrueAndCategoryIgnoreCaseAndNameContainingIgnoreCase(String category,String name);
     Page<Product> findByActiveTrue(Pageable pageable);
+    @Query("select p from Product p where p.active=true and (:category is null or lower(p.category)=lower(:category)) and (:q is null or lower(p.name) like lower(concat('%',:q,'%')))")
+    Page<Product> searchPage(@Param("q") String q, @Param("category") String category, Pageable pageable);
     boolean existsByNameIgnoreCase(String name);
     java.util.Optional<Product> findBySeedKey(String seedKey);
     @Modifying(clearAutomatically=true,flushAutomatically=true)

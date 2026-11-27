@@ -17,9 +17,11 @@ import java.util.*;
   if("price,asc".equals(sort))cmp=Comparator.comparing(Product::getPrice); else if("price,desc".equals(sort))cmp=Comparator.comparing(Product::getPrice).reversed();
   rows.sort(cmp); return rows.stream().map(ProductResponse::from).toList();
  }
- public Page<ProductResponse> page(int page,int size,String sort){if(size<1||size>100)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"size must be 1..100");
+ public Page<ProductResponse> page(String q,String category,int page,int size,String sort){if(size<1||size>100)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"size must be 1..100");
+  String query=q==null||q.isBlank()?null:q.trim();
+  String cat=category==null||category.isBlank()?null:category.trim();
   Sort s="price,asc".equals(sort)?Sort.by("price"):"price,desc".equals(sort)?Sort.by("price").descending():Sort.by("name");
-  return products.findByActiveTrue(PageRequest.of(Math.max(0,page),size,s)).map(ProductResponse::from);}
+  return products.searchPage(query,cat,PageRequest.of(Math.max(0,page),size,s)).map(ProductResponse::from);}
  public ProductResponse get(Long id){return ProductResponse.from(active(id));}
  public List<ProductResponse> inactive(){return products.findByActiveFalseOrderByNameAsc().stream().map(ProductResponse::from).toList();}
  @Transactional public ProductResponse create(ProductRequest r){return ProductResponse.from(products.save(new Product(r)));}
