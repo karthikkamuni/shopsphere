@@ -10,7 +10,9 @@ import java.util.*;
  private final ProductRepository products; private final StockReservationRepository reservations;
  public ProductService(ProductRepository products,StockReservationRepository reservations){this.products=products;this.reservations=reservations;}
  public List<ProductResponse> browse(String q,String category,String sort){
-  List<Product> rows=(category!=null&&!category.isBlank())?(q!=null&&!q.isBlank()?products.findByActiveTrueAndCategoryIgnoreCaseAndNameContainingIgnoreCase(category,q):products.findByActiveTrueAndCategoryIgnoreCase(category)):(q!=null&&!q.isBlank()?products.findByActiveTrueAndNameContainingIgnoreCase(q):products.findByActiveTrue());
+  String query=q==null?null:q.trim();
+  String cat=category==null?null:category.trim();
+  List<Product> rows=(cat!=null&&!cat.isBlank())?(query!=null&&!query.isBlank()?products.findByActiveTrueAndCategoryIgnoreCaseAndNameContainingIgnoreCase(cat,query):products.findByActiveTrueAndCategoryIgnoreCase(cat)):(query!=null&&!query.isBlank()?products.findByActiveTrueAndNameContainingIgnoreCase(query):products.findByActiveTrue());
   Comparator<Product> cmp=Comparator.comparing(Product::getName,String.CASE_INSENSITIVE_ORDER);
   if("price,asc".equals(sort))cmp=Comparator.comparing(Product::getPrice); else if("price,desc".equals(sort))cmp=Comparator.comparing(Product::getPrice).reversed();
   rows.sort(cmp); return rows.stream().map(ProductResponse::from).toList();

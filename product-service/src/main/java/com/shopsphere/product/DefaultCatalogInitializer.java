@@ -2,11 +2,12 @@ package com.shopsphere.product;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.util.List;
 @Configuration class DefaultCatalogInitializer {
- @Bean ApplicationRunner seedCatalog(CatalogSeeder seeder){return args->seeder.seed();}
+ @Bean ApplicationRunner seedCatalog(CatalogSeeder seeder,CatalogSeedMarkerRepository markers){return args->{try{seeder.seed();}catch(DataIntegrityViolationException e){if(!markers.existsById("default-catalog-v1"))throw e;}};}
 }
 @org.springframework.stereotype.Service class CatalogSeeder {
  private final ProductRepository products;private final CatalogSeedMarkerRepository markers;
