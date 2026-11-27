@@ -33,8 +33,8 @@ const patch = (url, body) => request(url, { method: 'PATCH', body });
 const del = (url) => request(url, { method: 'DELETE' });
 const query = (params) => { const q = new URLSearchParams(); Object.entries(params).forEach(([k,v]) => { if (v !== undefined && v !== null && v !== '') q.set(k, v); }); return q.size ? `?${q}` : ''; };
 
-export const register = (data) => post('/api/auth/register', data);
-export const login = (data) => post('/api/auth/login', data);
+export const register = (data) => request('/api/auth/register', { method: 'POST', body: data, auth: false });
+export const login = (data) => request('/api/auth/login', { method: 'POST', body: data, auth: false });
 export const logout = () => request('/api/auth/logout', { method: 'POST' });
 export const getProfile = () => get('/api/users/me');
 export const updateProfile = (data) => put('/api/users/me', data);

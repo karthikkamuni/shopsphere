@@ -21,7 +21,7 @@ function fakeFetch() {
     if (url === '/api/auth/register') return json(user, 201);
     if (url === '/api/users/me' && method === 'GET') return json(user);
     if (url === '/api/users/me' && method === 'PUT') return json({ ...user, ...body });
-    if (url === '/api/cart' && method === 'GET') return json(cart);
+    if (url === '/api/cart' && method === 'GET') { if (!options.headers?.Authorization) return json({ error: 'Authentication required' }, 401); return json(cart); }
     if (url === '/api/cart/items' && method === 'POST') { cart = { items: [{ productId: 7, product, quantity: body.quantity, unitPrice: product.price, subtotal: product.price * body.quantity, available: true, stock: product.stock }], total: product.price * body.quantity, itemCount: body.quantity }; return json(cart, 201); }
     if (url === '/api/orders/checkout') { expect(options.headers['Idempotency-Key']).toBeTruthy(); const order = { id: 31, userId: 4, productId: 7, productName: product.name, quantity: 1, unitPrice: product.price, totalPrice: product.price, status: 'PLACED', createdAt: '2026-11-26T10:00:00Z', items: [{ productId: 7, productName: product.name, unitPrice: product.price, quantity: 1, subtotal: product.price }] }; orders.push(order); cart = { items: [], total: 0, itemCount: 0 }; return json(order, 201); }
     if (url === '/api/orders/31') return json(orders[0] || { id: 31, userId: 4, totalPrice: 149.5, status: 'PLACED', items: [{ productId: 7, productName: product.name, unitPrice: 149.5, quantity: 1, subtotal: 149.5 }] });
@@ -65,6 +65,8 @@ describe('ShopSphere customer experience', () => {
     await user.click(screen.getByRole('button', { name: /^sign in/i }));
     await waitFor(() => expect(loginApi.calls.some((call) => call.url === '/api/auth/login')).toBe(true));
     expect(await screen.findByRole('heading', { level: 1, name: /find your/i })).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: 'Mira' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign out/i })).toBeInTheDocument();
     expect(localStorage.getItem('shopsphere.jwt')).toBe('jwt-user');
   });
 
