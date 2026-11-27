@@ -18,7 +18,15 @@ public class UserController {
     @GetMapping public List<UserResponse> list(@RequestParam(required=false) String q, Authentication auth) { requireAdmin(auth); return accounts.list(q); }
     @GetMapping("/{id}") public UserResponse get(@PathVariable Long id, Authentication auth) { requireAdmin(auth); return UserResponse.from(accounts.require(id)); }
     @PutMapping("/{id}") public UserResponse update(@PathVariable Long id,@Valid @RequestBody AdminUserUpdateRequest r,Authentication auth) { requireAdmin(auth); return UserResponse.from(accounts.adminUpdate(id,r)); }
-    @PatchMapping("/{id}/status") public UserResponse status(@PathVariable Long id,@RequestBody @Valid StatusRequest r,Authentication auth) { requireAdmin(auth); return UserResponse.from(accounts.block(id,r.blocked())); }
+    @PatchMapping("/{id}/status") public UserResponse status(@PathVariable Long id,@RequestBody @Valid StatusRequest r,Authentication auth) {
+        requireAdmin(auth);
+        if (r.blocked()) {
+            if (id.equals(principal(auth).id())) throw new org.springframework.web.server.ResponseStatusException(HttpStatus.CONFLICT,"You cannot block your own account");
+            User target=accounts.require(id);
+            if ("ADMIN".equals(target.getRole()) && !target.isBlocked() && accounts.activeAdminCount() <= 1) throw new org.springframework.web.server.ResponseStatusException(HttpStatus.CONFLICT,"Cannot block the last active administrator");
+        }
+        return UserResponse.from(accounts.block(id,r.blocked()));
+    }
     @DeleteMapping("/{id}") @ResponseStatus(HttpStatus.NO_CONTENT) public void delete(@PathVariable Long id,Authentication auth) {
         requireAdmin(auth);
         if (id.equals(principal(auth).id())) throw new org.springframework.web.server.ResponseStatusException(HttpStatus.CONFLICT,"You cannot delete your own account");

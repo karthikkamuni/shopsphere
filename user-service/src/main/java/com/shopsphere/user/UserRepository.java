@@ -7,7 +7,9 @@ import java.util.List;
 public interface UserRepository extends JpaRepository<User, Long> {
 
     boolean existsByEmail(String email);
+    boolean existsByEmailIgnoreCase(String email);
     Optional<User> findByEmailIgnoreCase(String email);
     List<User> findByNameContainingIgnoreCaseOrEmailContainingIgnoreCase(String name, String email);
     long countByRole(String role);
+    long countByRoleAndBlockedFalse(String role);
 }

@@ -86,4 +86,48 @@ class UserControllerTest {
         mvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON).content("{\"email\":\"password@example.com\",\"password\":\"newpassword1234\"}"))
                 .andExpect(status().isOk());
     }
+    @Test void signupAndLoginReturnClearErrorMessagesTrimmedEmailsAndStandardJwt() throws Exception {
+        mvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"  Trimmed User  \",\"email\":\"  Trimmed@Example.COM  \",\"password\":\"password1234\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.name").value("Trimmed User"))
+                .andExpect(jsonPath("$.email").value("trimmed@example.com"));
+        mvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"Duplicate\",\"email\":\"trimmed@example.com\",\"password\":\"password1234\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("Email is already registered"));
+        mvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"Short\",\"email\":\"short@example.com\",\"password\":\"short\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Invalid request"))
+                .andExpect(jsonPath("$.details").isArray());
+        String multiByte = "\uD83D\uDE00".repeat(20);
+        mvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"Long Byte\",\"email\":\"bytes@example.com\",\"password\":\"" + multiByte + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Password must be at most 72 bytes"));
+        String jwt = token("  TRIMMED@example.com  ", "password1234");
+        String payloadJson = new String(java.util.Base64.getUrlDecoder().decode(jwt.split("\\.")[1]), java.nio.charset.StandardCharsets.UTF_8);
+        org.assertj.core.api.Assertions.assertThat(
+                com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(payloadJson).get("sub").isTextual()
+        ).isTrue();
+        mvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"email\":\"trimmed@example.com\",\"password\":\"wrongpassword\"}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("Invalid email or password"));
+        mvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"email\":\"trimmed@example.com\",\"password\":\"" + multiByte + "\"}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("Invalid email or password"));
+        mvc.perform(post("/api/auth/logout")).andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("Authentication required"));
+        mvc.perform(post("/api/auth/logout").header("Authorization", "Bearer " + jwt))
+                .andExpect(status().isNoContent());
+        String admin = token("admin@test.example", "Administrator123");
+        String adminList = mvc.perform(get("/api/users?q=admin@test.example").header("Authorization", "Bearer " + admin)).andReturn().getResponse().getContentAsString();
+        long adminId = com.fasterxml.jackson.databind.json.JsonMapper.builder().build().readTree(adminList).get(0).get("id").asLong();
+        mvc.perform(patch("/api/users/" + adminId + "/status").header("Authorization", "Bearer " + admin)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"blocked\":true}"))
+                .andExpect(status().isConflict());
+    }
 }

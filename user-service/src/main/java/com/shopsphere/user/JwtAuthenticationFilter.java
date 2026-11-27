@@ -21,7 +21,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         String auth = request.getHeader("Authorization");
         if (auth != null && auth.startsWith("Bearer ")) {
-            Long id = jwt.subject(auth.substring(7));
+            String token = auth.substring(7).trim();
+            Long id = token.isEmpty() ? null : jwt.subject(token);
             if (id != null) users.findById(id).filter(u -> !u.isBlocked()).ifPresent(u -> {
                 var principal = new AuthPrincipal(u.getId(), u.getEmail());
                 var authentication = new UsernamePasswordAuthenticationToken(principal, null,

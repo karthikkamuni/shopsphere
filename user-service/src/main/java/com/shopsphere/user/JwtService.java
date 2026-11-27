@@ -28,19 +28,20 @@ public class JwtService {
         try {
             long now = Instant.now().getEpochSecond();
             String header = encoder.encodeToString(mapper.writeValueAsBytes(Map.of("alg", "HS256", "typ", "JWT")));
-            String payload = encoder.encodeToString(mapper.writeValueAsBytes(Map.of("sub", user.getId(), "role", user.getRole(), "iat", now, "exp", now + ttl)));
+            String payload = encoder.encodeToString(mapper.writeValueAsBytes(Map.of("sub", String.valueOf(user.getId()), "role", user.getRole(), "iat", now, "exp", now + ttl)));
             String unsigned = header + "." + payload;
             return unsigned + "." + encoder.encodeToString(sign(unsigned));
         } catch (Exception e) { throw new IllegalStateException("Unable to issue token", e); }
     }
     public Long subject(String token) {
         try {
-            String[] parts = token.split("\\.");
+            String[] parts = token.split("\\.", -1);
             if (parts.length != 3 || !MessageDigestUtil.constantTime(sign(parts[0] + "." + parts[1]), Base64.getUrlDecoder().decode(parts[2]))) return null;
             Map<?, ?> claims = mapper.readValue(Base64.getUrlDecoder().decode(parts[1]), Map.class);
             if (!"HS256".equals(mapper.readValue(Base64.getUrlDecoder().decode(parts[0]), Map.class).get("alg"))) return null;
-            if (((Number) claims.get("exp")).longValue() <= Instant.now().getEpochSecond()) return null;
-            return ((Number) claims.get("sub")).longValue();
+            if (!(claims.get("exp") instanceof Number exp) || exp.longValue() <= Instant.now().getEpochSecond()) return null;
+            Object sub = claims.get("sub");
+            return sub == null ? null : Long.valueOf(sub.toString());
         } catch (Exception e) { return null; }
     }
     private byte[] sign(String value) throws Exception {
